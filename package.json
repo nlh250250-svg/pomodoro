@@ -1,0 +1,65 @@
+{
+  "name": "pomodoro-timer",
+  "version": "1.0.0",
+  "description": "桌面番茄钟 — Desktop Pomodoro Timer",
+  "main": "main.js",
+  "author": "Pomodoro Timer",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.pomodoro.desktop",
+    "productName": "桌面番茄钟",
+    "directories": {
+      "output": "dist"
+    },
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets"
+      }
+    ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "桌面番茄钟",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico"
+    },
+    "portable": {
+      "artifactName": "桌面番茄钟_${version}_portable.exe"
+    }
+  },
+  "devDependencies": {
+    "electron": "^41.8.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  }
+}

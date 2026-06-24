@@ -1,4 +1,4 @@
-// ── DOM Elements ──────────────────────────────────────────────
+// ── DOM Elements ──────────────────────────────────────────────────────
 const el = {
   modeBadge: document.getElementById('modeBadge'),
   timerMinutes: document.getElementById('timerMinutes'),
@@ -26,23 +26,22 @@ const el = {
   titleBar: document.getElementById('titleBar'),
 };
 
-// ── State ─────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────
 const RING_CIRCUMFERENCE = 2 * Math.PI * 90; // r=90 → ~565.49
 el.ringProgress.style.strokeDasharray = RING_CIRCUMFERENCE;
 el.ringProgress.style.strokeDashoffset = '0';
 
-const state = {
-  mode: 'work',           // 'work' | 'break'
-  running: false,
-  workDuration: 25,       // minutes
-  breakDuration: 5,       // minutes
-  timeLeft: 25 * 60,      // seconds
-  totalTime: 25 * 60,     // seconds — for progress ring
-  intervalId: null,
+// ── Local UI state (mirrors main process state) ─────────────────────────
+const ui = {
+  mode: 'work',
+  isRunning: false,
+  remainingSeconds: 0,
+  totalSeconds: 0,
   todayWorkCount: 0,
+  settings: { workDuration: 25, breakDuration: 5 },
 };
 
-// ── Audio Context (for beep sound) ────────────────────────────
+// ── Audio Context (for beep sound) ────────────────────────────────────
 let audioCtx = null;
 function getAudioContext() {
   if (!audioCtx) {
@@ -68,31 +67,32 @@ function playBeep(frequency = 800, duration = 200, type = 'sine') {
 }
 
 function playAlarm() {
-  // Play a sequence of beeps
   playBeep(880, 150, 'square');
   setTimeout(() => playBeep(1100, 200, 'square'), 200);
   setTimeout(() => playBeep(1320, 300, 'square'), 450);
 }
 
-// ── Timer Logic ───────────────────────────────────────────────
+// ── UI Update ─────────────────────────────────────────────────────────
 function updateDisplay() {
-  const mins = Math.floor(state.timeLeft / 60);
-  const secs = state.timeLeft % 60;
+  const remaining = ui.remainingSeconds;
+  const mins = Math.floor(remaining / 60);
+  const secs = remaining % 60;
   el.timerMinutes.textContent = String(mins).padStart(2, '0');
   el.timerSeconds.textContent = String(secs).padStart(2, '0');
 
   // Update progress ring
-  const progress = state.timeLeft / state.totalTime;
+  const total = ui.totalSeconds || 1;
+  const progress = remaining / total;
   const offset = RING_CIRCUMFERENCE * (1 - progress);
   el.ringProgress.style.strokeDashoffset = offset;
 
   // Update tray tooltip
-  const modeText = state.mode === 'work' ? '工作中' : '休息中';
+  const modeText = ui.mode === 'work' ? '工作中' : '休息中';
   window.timerAPI.setTrayTooltip(`番茄钟 — ${modeText} ${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`);
 }
 
 function updateModeUI() {
-  if (state.mode === 'work') {
+  if (ui.mode === 'work') {
     el.modeBadge.textContent = '🍅 工作中';
     el.modeBadge.className = 'mode-badge work';
     el.ringProgress.classList.remove('break-mode');
@@ -105,114 +105,72 @@ function updateModeUI() {
   }
 }
 
-function resetTimer() {
-  state.running = false;
-  state.timeLeft = state.mode === 'work' ? state.workDuration * 60 : state.breakDuration * 60;
-  state.totalTime = state.timeLeft;
-  clearInterval(state.intervalId);
-  state.intervalId = null;
-
-  updateDisplay();
-  updateStartButton();
-  el.timerDisplay.classList.remove('running');
-}
-
-function switchMode() {
-  state.mode = state.mode === 'work' ? 'break' : 'work';
-  state.timeLeft = state.mode === 'work' ? state.workDuration * 60 : state.breakDuration * 60;
-  state.totalTime = state.timeLeft;
-  updateModeUI();
-  updateDisplay();
-}
-
-function startTimer() {
-  if (state.running) return;
-
-  // Initialize timeLeft if not set
-  if (state.timeLeft <= 0) {
-    state.timeLeft = state.mode === 'work' ? state.workDuration * 60 : state.breakDuration * 60;
-    state.totalTime = state.timeLeft;
-  }
-
-  state.running = true;
-  updateStartButton();
-  el.timerDisplay.classList.add('running');
-
-  state.intervalId = setInterval(() => {
-    state.timeLeft--;
-
-    if (state.timeLeft <= 0) {
-      // Timer finished
-      clearInterval(state.intervalId);
-      state.intervalId = null;
-      state.running = false;
-
-      playAlarm();
-
-      // Save record
-      const duration = state.mode === 'work' ? state.workDuration : state.breakDuration;
-      window.timerAPI.saveRecord({ type: state.mode, duration }).then(stats => {
-        if (stats && state.mode === 'work') {
-          state.todayWorkCount = stats.workCount;
-          el.todayCount.textContent = stats.workCount;
-        }
-      });
-
-      // Send notification
-      if (state.mode === 'work') {
-        window.timerAPI.sendNotification('🍅 番茄钟', '工作时间结束！休息一下吧~');
-      } else {
-        window.timerAPI.sendNotification('☕ 番茄钟', '休息时间结束！开始新的番茄吧~');
-      }
-
-      // Switch mode and reset
-      switchMode();
-      resetTimer();
-      updateDisplay();
-    }
-
-    updateDisplay();
-  }, 1000);
-}
-
-function pauseTimer() {
-  state.running = false;
-  clearInterval(state.intervalId);
-  state.intervalId = null;
-  updateStartButton();
-  el.timerDisplay.classList.remove('running');
-}
-
-function toggleTimer() {
-  if (state.running) {
-    pauseTimer();
-  } else {
-    startTimer();
-  }
-}
-
 function updateStartButton() {
-  if (state.running) {
+  if (ui.isRunning) {
     el.iconPlay.style.display = 'none';
     el.iconPause.style.display = 'block';
     el.btnStart.classList.add('paused');
+    el.timerDisplay.classList.add('running');
   } else {
     el.iconPlay.style.display = 'block';
     el.iconPause.style.display = 'none';
     el.btnStart.classList.remove('paused');
+    el.timerDisplay.classList.remove('running');
   }
 }
 
-// ── Event Handlers ────────────────────────────────────────────
-el.btnStart.addEventListener('click', toggleTimer);
-el.btnReset.addEventListener('click', resetTimer);
-el.btnSkip.addEventListener('click', () => {
-  if (state.running) {
-    pauseTimer();
+function applyState(state) {
+  if (!state) return;
+
+  const wasRunning = ui.isRunning;
+  const wasMode = ui.mode;
+
+  ui.mode = state.mode;
+  ui.isRunning = state.isRunning;
+  ui.remainingSeconds = state.remainingSeconds;
+  ui.totalSeconds = state.totalSeconds;
+
+  if (ui.mode !== wasMode) {
+    updateModeUI();
   }
-  switchMode();
-  resetTimer();
+  if (ui.isRunning !== wasRunning) {
+    updateStartButton();
+  }
   updateDisplay();
+}
+
+// ── Listen for state pushed from main process ─────────────────────────
+window.timerAPI.onTimerState((state) => {
+  applyState(state);
+});
+
+// Listen for alarm trigger from main process
+window.timerAPI.onPlayAlarm(() => {
+  playAlarm();
+});
+
+// Listen for today stats updates
+window.timerAPI.onTodayStats((stats) => {
+  if (stats && typeof stats.workCount === 'number') {
+    ui.todayWorkCount = stats.workCount;
+    el.todayCount.textContent = stats.workCount;
+  }
+});
+
+// ── Event Handlers ─────────────────────────────────────────────────────
+// Start/Pause toggle
+el.btnStart.addEventListener('click', () => {
+  window.timerAPI.timerToggle();
+});
+
+// Reset
+el.btnReset.addEventListener('click', () => {
+  window.timerAPI.timerReset();
+});
+
+// Skip
+el.btnSkip.addEventListener('click', () => {
+  window.timerAPI.timerSkip();
 });
 
 // Settings
@@ -224,25 +182,15 @@ el.settingsToggle.addEventListener('click', () => {
 el.workDuration.addEventListener('input', () => {
   const val = parseInt(el.workDuration.value);
   el.workDurationLabel.textContent = `${val} 分钟`;
-  state.workDuration = val;
-  if (!state.running && state.mode === 'work') {
-    state.timeLeft = val * 60;
-    state.totalTime = val * 60;
-    updateDisplay();
-  }
-  window.timerAPI.saveSettings({ workDuration: state.workDuration, breakDuration: state.breakDuration });
+  ui.settings.workDuration = val;
+  window.timerAPI.saveSettings({ workDuration: val, breakDuration: ui.settings.breakDuration });
 });
 
 el.breakDuration.addEventListener('input', () => {
   const val = parseInt(el.breakDuration.value);
   el.breakDurationLabel.textContent = `${val} 分钟`;
-  state.breakDuration = val;
-  if (!state.running && state.mode === 'break') {
-    state.timeLeft = val * 60;
-    state.totalTime = val * 60;
-    updateDisplay();
-  }
-  window.timerAPI.saveSettings({ workDuration: state.workDuration, breakDuration: state.breakDuration });
+  ui.settings.breakDuration = val;
+  window.timerAPI.saveSettings({ workDuration: ui.settings.workDuration, breakDuration: val });
 });
 
 // History toggle
@@ -262,34 +210,37 @@ el.historyToggle.addEventListener('click', async () => {
 el.btnMinimize.addEventListener('click', () => window.timerAPI.minimizeWindow());
 el.btnClose.addEventListener('click', () => window.timerAPI.closeWindow());
 
-// Tray actions
-window.timerAPI.onTrayAction((action) => {
-  switch (action) {
-    case 'start': if (!state.running) startTimer(); break;
-    case 'pause': if (state.running) pauseTimer(); break;
-    case 'reset': resetTimer(); break;
-  }
-});
-
-// Keyboard shortcuts
+// ── Keyboard Shortcuts ────────────────────────────────────────────────
+// Only work when the window is focused AND the user is NOT typing in an input
 document.addEventListener('keydown', (e) => {
+  // Ignore if user is typing in a text field, contenteditable, etc.
+  const tag = document.activeElement ? document.activeElement.tagName : '';
+  const isEditable = document.activeElement
+    && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+        || document.activeElement.isContentEditable);
+
   if (e.code === 'Space') {
-    e.preventDefault();
-    toggleTimer();
+    if (!isEditable) {
+      e.preventDefault();
+      window.timerAPI.timerToggle();
+    }
   } else if (e.code === 'KeyR') {
-    resetTimer();
+    if (!isEditable) {
+      e.preventDefault();
+      window.timerAPI.timerReset();
+    }
   } else if (e.code === 'KeyS') {
-    if (state.running) pauseTimer();
-    switchMode();
-    resetTimer();
-    updateDisplay();
+    if (!isEditable) {
+      e.preventDefault();
+      window.timerAPI.timerSkip();
+    }
   }
 });
 
-// ── History ───────────────────────────────────────────────────
+// ── History ────────────────────────────────────────────────────────────
 async function loadHistory() {
   const history = await window.timerAPI.getHistory();
-  const dates = Object.keys(history).sort().reverse().slice(0, 7); // last 7 days
+  const dates = Object.keys(history).sort().reverse().slice(0, 7);
 
   if (dates.length === 0) {
     el.historyList.innerHTML = '<div style="padding:8px;color:var(--text-muted)">暂无记录</div>';
@@ -324,41 +275,50 @@ async function loadHistory() {
   }).join('');
 }
 
-// ── Initialization ────────────────────────────────────────────
+// ── Initialization ─────────────────────────────────────────────────────
 async function init() {
   // Load settings
   try {
     const settings = await window.timerAPI.getSettings();
     if (settings) {
-      state.workDuration = settings.workDuration || 25;
-      state.breakDuration = settings.breakDuration || 5;
+      ui.settings.workDuration = settings.workDuration || 25;
+      ui.settings.breakDuration = settings.breakDuration || 5;
     }
   } catch (_) {
     // Use defaults
   }
 
-  // Sync UI with settings
-  el.workDuration.value = state.workDuration;
-  el.breakDuration.value = state.breakDuration;
-  el.workDurationLabel.textContent = `${state.workDuration} 分钟`;
-  el.breakDurationLabel.textContent = `${state.breakDuration} 分钟`;
+  // Sync settings UI
+  el.workDuration.value = ui.settings.workDuration;
+  el.breakDuration.value = ui.settings.breakDuration;
+  el.workDurationLabel.textContent = `${ui.settings.workDuration} 分钟`;
+  el.breakDurationLabel.textContent = `${ui.settings.breakDuration} 分钟`;
 
   // Load today's stats
   try {
     const stats = await window.timerAPI.getTodayStats();
     if (stats) {
-      state.todayWorkCount = stats.workCount || 0;
-      el.todayCount.textContent = state.todayWorkCount;
+      ui.todayWorkCount = stats.workCount || 0;
+      el.todayCount.textContent = ui.todayWorkCount;
     }
   } catch (_) {
     // No stats yet
   }
 
-  // Initialize timer state
-  state.timeLeft = state.workDuration * 60;
-  state.totalTime = state.timeLeft;
+  // Get initial timer state from main process
+  try {
+    const state = await window.timerAPI.timerGetState();
+    if (state) {
+      applyState(state);
+    }
+  } catch (_) {
+    // Use defaults — already set in ui
+    ui.remainingSeconds = ui.settings.workDuration * 60;
+    ui.totalSeconds = ui.remainingSeconds;
+    updateDisplay();
+  }
+
   updateModeUI();
-  updateDisplay();
   updateStartButton();
 }
 

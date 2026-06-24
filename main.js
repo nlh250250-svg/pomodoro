@@ -34,6 +34,18 @@ const store = new Store({
       endAt: null,
       remainingSeconds: 0,
       totalSeconds: 0,
+    },
+    // Alarm system defaults
+    alarmSettings: {
+      sound: 'classic',
+      volume: 0.7,
+      continuous: true,
+      snoozeMinutes: 9,
+    },
+    alarmState: {
+      active: false,
+      reason: null,
+      snoozeUntil: null,
     }
   }
 });
@@ -43,21 +55,72 @@ let tray = null;
 let isQuitting = false;
 
 // ── Timer State (in main process) ─────────────────────────────────────
-// Use wall-clock (endAt) approach — immune to setInterval drift/throttling
 const timer = {
   mode: 'work',          // 'work' | 'break'
   isRunning: false,
-  endAt: null,           // Date.now() + remainingSeconds * 1000
-  remainingSeconds: 0,   // seconds left (computed live from endAt)
-  totalSeconds: 0,       // total seconds for current session
+  endAt: null,
+  remainingSeconds: 0,
+  totalSeconds: 0,
   intervalId: null,
 };
 
+// ── Alarm State (in main process) ─────────────────────────────────────
+const alarmState = {
+  active: false,
+  reason: null,         // 'workComplete' | 'breakComplete' | null
+  message: '',
+  startedAt: null,
+  snoozeUntil: null,
+  snoozeTimer: null,
+};
+
+function getAlarmSettings() {
+  const defaults = { sound: 'classic', volume: 0.7, continuous: true, snoozeMinutes: 9 };
+  const saved = store.get('alarmSettings');
+  return { ...defaults, ...(saved || {}) };
+}
+
+function saveAlarmSettingsToStore(settings) {
+  store.set('alarmSettings', settings);
+}
+
+function saveAlarmStateToStore() {
+  store.set('alarmState', {
+    active: alarmState.active,
+    reason: alarmState.reason,
+    snoozeUntil: alarmState.snoozeUntil,
+  });
+}
+
+function getAlarmMessage() {
+  return alarmState.reason === 'workComplete'
+    ? { title: '工作时间结束', body: '该进入休息了', nextMode: 'break' }
+    : { title: '休息时间结束', body: '该开始工作了', nextMode: 'work' };
+}
+
+// ── Path helpers (dev vs packaged) ────────────────────────────────────
+function getAssetPath(filename) {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'assets', filename);
+  }
+  return path.join(__dirname, 'assets', filename);
+}
+
+function loadAssetImage(filename) {
+  try {
+    const filePath = getAssetPath(filename);
+    const buffer = fs.readFileSync(filePath);
+    return nativeImage.createFromBuffer(buffer);
+  } catch (_) {
+    return nativeImage.createEmpty();
+  }
+}
+
+// ── Load persisted timer state ────────────────────────────────────────
 function loadTimerState() {
   try {
     const saved = store.get('timerState');
     if (saved && saved.endAt && saved.isRunning) {
-      // Restore running timer based on wall-clock endAt
       const remaining = Math.max(0, Math.ceil((saved.endAt - Date.now()) / 1000));
       L.info(`Restoring timer: mode=${saved.mode}, remaining=${remaining}s, endAt=${new Date(saved.endAt).toISOString()}`);
 
@@ -65,20 +128,17 @@ function loadTimerState() {
       timer.totalSeconds = saved.totalSeconds || 0;
 
       if (remaining <= 0) {
-        // Timer already expired — auto-complete and switch mode
         L.info('Timer already expired on restore — auto-completing');
         timer.mode = saved.mode;
         timer.isRunning = false;
         timer.endAt = null;
         timer.remainingSeconds = 0;
         timer.totalSeconds = timer.mode === 'work' ? getWorkDuration() : getBreakDuration();
-        // Immediately complete and switch
         handleTimerComplete();
       } else {
         timer.isRunning = true;
         timer.endAt = saved.endAt;
         timer.remainingSeconds = remaining;
-        // Resume the tick interval
         startTick();
       }
       return;
@@ -93,6 +153,37 @@ function loadTimerState() {
   timer.endAt = null;
   timer.totalSeconds = getWorkDuration();
   timer.remainingSeconds = timer.totalSeconds;
+}
+
+// ── Load persisted alarm state ────────────────────────────────────────
+function loadAlarmState() {
+  try {
+    const saved = store.get('alarmState');
+    if (!saved) return;
+
+    if (saved.snoozeUntil && saved.snoozeUntil > Date.now()) {
+      // Still in snooze period — set a timer to resume
+      const remainingMs = saved.snoozeUntil - Date.now();
+      alarmState.reason = saved.reason;
+      alarmState.snoozeUntil = saved.snoozeUntil;
+      startSnoozeTimer(remainingMs);
+      L.info(`Restored snooze timer: ${Math.round(remainingMs / 1000)}s remaining, reason=${saved.reason}`);
+      return;
+    }
+
+    if (saved.active || (saved.snoozeUntil && saved.snoozeUntil <= Date.now())) {
+      // Alarm was active, or snooze period expired — trigger now
+      alarmState.active = true;
+      alarmState.reason = saved.reason || 'workComplete';
+      alarmState.startedAt = Date.now();
+      const msg = getAlarmMessage();
+      alarmState.message = msg.body;
+      saveAlarmStateToStore();
+      L.info(`Restored active alarm: reason=${alarmState.reason}`);
+    }
+  } catch (e) {
+    L.error(`Failed to load alarm state: ${e.message}`);
+  }
 }
 
 function saveTimerState() {
@@ -117,29 +208,9 @@ function getBreakDuration() {
   return (settings && settings.breakDuration) ? settings.breakDuration : 5;
 }
 
-// ── Path helpers (dev vs packaged) ────────────────────────────────────
-function getAssetPath(filename) {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'assets', filename);
-  }
-  return path.join(__dirname, 'assets', filename);
-}
-
-function loadAssetImage(filename) {
-  try {
-    const filePath = getAssetPath(filename);
-    const buffer = fs.readFileSync(filePath);
-    return nativeImage.createFromBuffer(buffer);
-  } catch (_) {
-    return nativeImage.createEmpty();
-  }
-}
-
 // ── Timer Tick ─────────────────────────────────────────────────────────
 function startTick() {
-  // Clear any existing interval first
   stopTick();
-
   L.info('Interval created');
 
   timer.intervalId = setInterval(() => {
@@ -152,14 +223,13 @@ function startTick() {
       timer.remainingSeconds = newRemaining;
     }
 
-    // Send state to renderer
     broadcastState();
 
     if (timer.remainingSeconds <= 0) {
       L.info('Timer complete');
       handleTimerComplete();
     }
-  }, 250); // Check every 250ms for smooth UI
+  }, 250);
 }
 
 function stopTick() {
@@ -184,6 +254,28 @@ function broadcastState() {
   }
 }
 
+function broadcastAlarmState() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (alarmState.active) {
+      const msg = getAlarmMessage();
+      const settings = getAlarmSettings();
+      mainWindow.webContents.send('alarm-start', {
+        reason: alarmState.reason,
+        title: msg.title,
+        body: msg.body,
+        sound: settings.sound,
+        volume: settings.volume,
+        continuous: settings.continuous,
+        snoozeMinutes: settings.snoozeMinutes,
+      });
+    } else {
+      mainWindow.webContents.send('alarm-stop', {
+        reason: 'clear',
+      });
+    }
+  }
+}
+
 // ── Timer Controls ─────────────────────────────────────────────────────
 function handleStart() {
   if (timer.isRunning) {
@@ -191,7 +283,18 @@ function handleStart() {
     return;
   }
 
-  // If remaining is 0, set up a fresh timer
+  // Ignore start if alarm is active
+  if (alarmState.active) {
+    L.warn('handleStart called but alarm is active — ignoring');
+    return;
+  }
+
+  // Clear snooze if user explicitly starts a new timer
+  if (alarmState.snoozeTimer) {
+    L.info('handleStart: clearing snooze timer');
+    clearAlarm('reset');
+  }
+
   if (timer.remainingSeconds <= 0) {
     timer.totalSeconds = timer.mode === 'work' ? getWorkDuration() * 60 : getBreakDuration() * 60;
     timer.remainingSeconds = timer.totalSeconds;
@@ -212,7 +315,6 @@ function handlePause(userInitiated = true) {
     return;
   }
 
-  // Compute and freeze remaining
   timer.remainingSeconds = Math.max(0, Math.ceil((timer.endAt - Date.now()) / 1000));
   timer.endAt = null;
   timer.isRunning = false;
@@ -227,6 +329,11 @@ function handleReset() {
   L.info('Timer reset');
   stopTick();
 
+  // Clear any active alarm
+  if (alarmState.active || alarmState.snoozeTimer) {
+    clearAlarm('reset');
+  }
+
   timer.isRunning = false;
   timer.endAt = null;
   timer.totalSeconds = timer.mode === 'work' ? getWorkDuration() * 60 : getBreakDuration() * 60;
@@ -238,6 +345,12 @@ function handleReset() {
 
 function handleSkip() {
   L.info('Timer skip');
+
+  // Clear any active alarm
+  if (alarmState.active || alarmState.snoozeTimer) {
+    clearAlarm('skip');
+  }
+
   handlePause(false);
   switchMode();
   broadcastState();
@@ -248,26 +361,67 @@ function handleTimerComplete() {
   timer.isRunning = false;
   timer.endAt = null;
 
-  // Play alarm (via renderer)
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('play-alarm');
-  }
+  const settings = getAlarmSettings();
 
-  // Save record
+  if (settings.continuous) {
+    // ── Continuous alarm mode: enter alarm state ──────────────────
+    L.info('Timer complete — entering alarm state');
+
+    alarmState.active = true;
+    alarmState.reason = timer.mode === 'work' ? 'workComplete' : 'breakComplete';
+    alarmState.startedAt = Date.now();
+    const msg = getAlarmMessage();
+    alarmState.message = msg.body;
+    alarmState.snoozeUntil = null;
+    alarmState.snoozeTimer = null;
+
+    saveAlarmStateToStore();
+
+    // Save record
+    saveCompletionRecord();
+
+    // Send notification
+    sendCompletionNotification();
+
+    // Tell renderer to start alarm and show popup
+    broadcastAlarmState();
+
+    // Show and focus window
+    showAndFocus();
+    // Brief top-most to catch user attention
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setAlwaysOnTop(true);
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.setAlwaysOnTop(false);
+        }
+      }, 5000);
+    }
+
+    // Update tray menu to show alarm actions
+    updateTrayMenu();
+
+    // Do NOT switch mode — wait for user to dismiss
+  } else {
+    // ── One-shot alarm: old behavior ──────────────────────────────
+    L.info('Timer complete — one-shot alarm');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('play-alarm');
+    }
+    saveCompletionRecord();
+    sendCompletionNotification();
+    switchMode();
+    broadcastState();
+  }
+}
+
+function saveCompletionRecord() {
   const settings = store.get('settings');
   const duration = timer.mode === 'work'
     ? (settings && settings.workDuration) || 25
     : (settings && settings.breakDuration) || 5;
 
   saveRecord({ type: timer.mode, duration });
-
-  // Send notification
-  sendCompletionNotification();
-
-  // Switch mode and reset
-  L.info(`Timer completed — switching from ${timer.mode} to ${timer.mode === 'work' ? 'break' : 'work'}`);
-  switchMode();
-  broadcastState();
 }
 
 function switchMode() {
@@ -297,6 +451,140 @@ function sendCompletionNotification() {
   }
 }
 
+// ── Alarm Controls ────────────────────────────────────────────────────
+function clearAlarm(trigger) {
+  L.info(`Alarm cleared by: ${trigger}`);
+
+  if (alarmState.snoozeTimer) {
+    clearTimeout(alarmState.snoozeTimer);
+    alarmState.snoozeTimer = null;
+    L.info('Alarm snooze timer cleared');
+  }
+
+  const wasActive = alarmState.active;
+  alarmState.active = false;
+  alarmState.reason = null;
+  alarmState.message = '';
+  alarmState.startedAt = null;
+  alarmState.snoozeUntil = null;
+
+  saveAlarmStateToStore();
+
+  if (wasActive) {
+    // Tell renderer to stop alarm
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('alarm-stop', { reason: trigger });
+    }
+  }
+
+  updateTrayMenu();
+}
+
+function handleAlarmDismiss() {
+  // Allow dismiss during both active alarm and snooze period
+  if (!alarmState.active && !alarmState.snoozeTimer) {
+    L.warn('handleAlarmDismiss called but no active alarm or snooze');
+    return;
+  }
+
+  L.info('Alarm dismissed by user');
+
+  // Remember the completed mode before clearing
+  const completedMode = timer.mode;
+
+  clearAlarm('dismiss');
+
+  // Now switch to the next mode (the mode after the one that completed)
+  timer.mode = completedMode === 'work' ? 'break' : 'work';
+  timer.isRunning = false;
+  timer.endAt = null;
+  timer.totalSeconds = timer.mode === 'work' ? getWorkDuration() * 60 : getBreakDuration() * 60;
+  timer.remainingSeconds = timer.totalSeconds;
+  stopTick();
+  saveTimerState();
+  broadcastState();
+}
+
+function handleAlarmSnooze() {
+  if (!alarmState.active) {
+    L.warn('handleAlarmSnooze called but no active alarm');
+    return;
+  }
+
+  // Prevent multiple snooze timers
+  if (alarmState.snoozeTimer) {
+    L.warn('handleAlarmSnooze called but snooze timer already active — ignoring');
+    return;
+  }
+
+  const settings = getAlarmSettings();
+  const snoozeMs = (settings.snoozeMinutes || 9) * 60 * 1000;
+  const snoozeUntil = Date.now() + snoozeMs;
+
+  L.info(`Alarm snoozed for ${settings.snoozeMinutes} minutes (until ${new Date(snoozeUntil).toISOString()})`);
+
+  // Stop the active alarm but keep the reason
+  alarmState.active = false;
+  alarmState.snoozeUntil = snoozeUntil;
+  alarmState.startedAt = null;
+  saveAlarmStateToStore();
+
+  // Tell renderer to stop alarm
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('alarm-stop', { reason: 'snooze' });
+    // Also notify renderer that snooze is active (for UI feedback)
+    mainWindow.webContents.send('alarm-snoozed', {
+      snoozeUntil,
+      snoozeMinutes: settings.snoozeMinutes,
+    });
+  }
+
+  updateTrayMenu();
+
+  // Set snooze timer
+  startSnoozeTimer(snoozeMs);
+}
+
+function startSnoozeTimer(delayMs) {
+  // Clear any existing timer first
+  if (alarmState.snoozeTimer) {
+    clearTimeout(alarmState.snoozeTimer);
+    alarmState.snoozeTimer = null;
+  }
+
+  alarmState.snoozeTimer = setTimeout(() => {
+    L.info('Alarm resumed from snooze');
+    alarmState.snoozeTimer = null;
+
+    // Reactivate alarm
+    alarmState.active = true;
+    alarmState.snoozeUntil = null;
+    alarmState.startedAt = Date.now();
+    const msg = getAlarmMessage();
+    alarmState.message = msg.body;
+    saveAlarmStateToStore();
+
+    // Trigger alarm in renderer
+    broadcastAlarmState();
+
+    // Show window
+    showAndFocus();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setAlwaysOnTop(true);
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.setAlwaysOnTop(false);
+        }
+      }, 5000);
+    }
+
+    updateTrayMenu();
+  }, delayMs);
+
+  L.info(`Snooze timer set for ${Math.round(delayMs / 1000)}s`);
+}
+
+// ── Record ─────────────────────────────────────────────────────────────
 function saveRecord(record) {
   const today = new Date().toISOString().split('T')[0];
   const history = store.get('history') || {};
@@ -309,7 +597,6 @@ function saveRecord(record) {
   });
   store.set('history', history);
 
-  // Send updated stats to renderer
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('today-stats', getTodayStats());
   }
@@ -332,9 +619,9 @@ function createWindow() {
 
   mainWindow = new BrowserWindow({
     width: 420,
-    height: 560,
+    height: 620,
     minWidth: 360,
-    minHeight: 480,
+    minHeight: 540,
     frame: false,
     transparent: true,
     resizable: true,
@@ -344,13 +631,12 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      backgroundThrottling: false, // Prevent timer throttling when window is hidden
+      backgroundThrottling: false,
     }
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
-  // Close to tray — never quit unless explicitly exiting
   mainWindow.on('close', (e) => {
     if (!isQuitting) {
       e.preventDefault();
@@ -365,19 +651,20 @@ function createWindow() {
 
   mainWindow.on('show', () => {
     L.info('Window shown');
-    tray && tray.setContextMenu(buildTrayMenu());
-    // Resync state when window appears
+    updateTrayMenu();
     broadcastState();
+    broadcastAlarmState();
   });
 
   mainWindow.on('restore', () => {
     L.info('Window restored');
     broadcastState();
+    broadcastAlarmState();
   });
 
   mainWindow.on('focus', () => {
-    // Re-broadcast state on focus to ensure UI is in sync
     broadcastState();
+    broadcastAlarmState();
   });
 }
 
@@ -399,7 +686,10 @@ function createTray() {
 
 function buildTrayMenu() {
   const isVisible = mainWindow && mainWindow.isVisible();
-  return Menu.buildFromTemplate([
+  const hasAlarm = alarmState.active;
+  const hasSnooze = !!alarmState.snoozeTimer;
+
+  const menuItems = [
     {
       label: isVisible ? '最小化到托盘' : '显示窗口',
       click: () => {
@@ -411,6 +701,51 @@ function buildTrayMenu() {
         }
       }
     },
+    { type: 'separator' },
+  ];
+
+  // Alarm action items (only when alarm/snooze is active)
+  if (hasAlarm) {
+    menuItems.push({
+      label: '关闭提醒',
+      click: () => {
+        L.info('Tray: dismiss alarm');
+        handleAlarmDismiss();
+      }
+    });
+    menuItems.push({
+      label: `延时 ${getAlarmSettings().snoozeMinutes} 分钟`,
+      click: () => {
+        L.info('Tray: snooze alarm');
+        handleAlarmSnooze();
+      }
+    });
+  } else if (hasSnooze) {
+    menuItems.push({
+      label: '关闭提醒（取消延时）',
+      click: () => {
+        L.info('Tray: dismiss (cancel snooze)');
+        handleAlarmDismiss();
+      }
+    });
+    menuItems.push({
+      label: '延时中...',
+      enabled: false,
+    });
+  } else {
+    menuItems.push({
+      label: '关闭提醒',
+      enabled: false,
+    });
+    menuItems.push({
+      label: `延时 ${getAlarmSettings().snoozeMinutes} 分钟`,
+      enabled: false,
+    });
+  }
+
+  menuItems.push({ type: 'separator' });
+
+  menuItems.push(
     {
       label: '开始计时',
       click: () => {
@@ -438,18 +773,30 @@ function buildTrayMenu() {
       click: () => {
         L.info('User quit from tray');
         isQuitting = true;
+        if (alarmState.active || alarmState.snoozeTimer) {
+          clearAlarm('quit');
+        }
         app.quit();
       }
     }
-  ]);
+  );
+
+  return Menu.buildFromTemplate(menuItems);
+}
+
+function updateTrayMenu() {
+  if (tray) {
+    tray.setContextMenu(buildTrayMenu());
+  }
 }
 
 function showAndFocus() {
   if (mainWindow) {
     mainWindow.show();
     mainWindow.focus();
-    tray.setContextMenu(buildTrayMenu());
+    updateTrayMenu();
     broadcastState();
+    broadcastAlarmState();
   }
 }
 
@@ -457,8 +804,6 @@ function showAndFocus() {
 function setupPowerMonitor() {
   powerMonitor.on('suspend', () => {
     L.info('System suspend — timer remains (wall-clock)');
-    // Wall-clock approach means we DON'T pause — the endAt remains valid
-    // But we stop the interval to save CPU
     stopTick();
     saveTimerState();
   });
@@ -466,12 +811,48 @@ function setupPowerMonitor() {
   powerMonitor.on('resume', () => {
     L.info('System resume — recalculating timer from wall-clock');
 
+    // Check snooze timer
+    if (alarmState.snoozeUntil) {
+      const now = Date.now();
+      if (alarmState.snoozeUntil <= now) {
+        // Snooze expired during sleep — trigger alarm
+        L.info('Snooze expired during sleep — triggering alarm');
+        if (alarmState.snoozeTimer) {
+          clearTimeout(alarmState.snoozeTimer);
+          alarmState.snoozeTimer = null;
+        }
+        alarmState.active = true;
+        alarmState.snoozeUntil = null;
+        alarmState.startedAt = now;
+        const msg = getAlarmMessage();
+        alarmState.message = msg.body;
+        saveAlarmStateToStore();
+        broadcastAlarmState();
+        showAndFocus();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.setAlwaysOnTop(true);
+          setTimeout(() => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.setAlwaysOnTop(false);
+            }
+          }, 5000);
+        }
+        updateTrayMenu();
+        return;
+      } else {
+        // Still in snooze — restart timer
+        const remaining = alarmState.snoozeUntil - now;
+        L.info(`Snooze still active after resume: ${Math.round(remaining / 1000)}s remaining`);
+        startSnoozeTimer(remaining);
+      }
+    }
+
+    // Check timer
     if (timer.isRunning && timer.endAt) {
       const remaining = Math.max(0, Math.ceil((timer.endAt - Date.now()) / 1000));
       L.info(`After resume: remaining=${remaining}s`);
 
       if (remaining <= 0) {
-        // Timer expired during sleep — complete it
         L.info('Timer expired during sleep — completing');
         timer.remainingSeconds = 0;
         handleTimerComplete();
@@ -534,6 +915,54 @@ function setupIPC() {
     return getTimerStateForRenderer();
   });
 
+  // ── Alarm IPC handlers ──────────────────────────────────────────────
+  ipcMain.handle('alarm-dismiss', () => {
+    L.info('IPC: alarm dismiss');
+    handleAlarmDismiss();
+    return getTimerStateForRenderer();
+  });
+
+  ipcMain.handle('alarm-snooze', () => {
+    L.info('IPC: alarm snooze');
+    handleAlarmSnooze();
+    return getTimerStateForRenderer();
+  });
+
+  ipcMain.handle('alarm-preview-start', (_event, soundName) => {
+    L.info(`IPC: alarm preview start — ${soundName}`);
+    // No main-process side effect; renderer handles audio preview
+    return true;
+  });
+
+  ipcMain.handle('alarm-preview-stop', () => {
+    L.info('IPC: alarm preview stop');
+    return true;
+  });
+
+  ipcMain.handle('update-alarm-settings', (_event, settings) => {
+    L.info(`IPC: alarm settings updated — ${JSON.stringify(settings)}`);
+    saveAlarmSettingsToStore(settings);
+    // Notify renderer if window is open
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('alarm-settings-updated', settings);
+    }
+    return settings;
+  });
+
+  ipcMain.handle('get-alarm-settings', () => {
+    return getAlarmSettings();
+  });
+
+  ipcMain.handle('get-alarm-state', () => {
+    const settings = getAlarmSettings();
+    return {
+      active: alarmState.active,
+      reason: alarmState.reason,
+      snoozeUntil: alarmState.snoozeUntil,
+      snoozeMinutes: settings.snoozeMinutes,
+    };
+  });
+
   // Save a completed Pomodoro record
   ipcMain.handle('save-record', (_event, record) => {
     saveRecord(record);
@@ -557,8 +986,7 @@ function setupIPC() {
 
   ipcMain.handle('save-settings', (_event, settings) => {
     store.set('settings', settings);
-    // If not running and in work mode, update remaining
-    if (!timer.isRunning) {
+    if (!timer.isRunning && !alarmState.active) {
       if (timer.mode === 'work') {
         timer.totalSeconds = settings.workDuration * 60;
         timer.remainingSeconds = timer.totalSeconds;
@@ -622,8 +1050,9 @@ function getTimerStateForRenderer() {
 app.whenReady().then(() => {
   L.info('App starting');
 
-  // Load persisted timer state before creating window
+  // Load persisted state before creating window
   loadTimerState();
+  loadAlarmState();
 
   setupIPC();
   setupPowerMonitor();
@@ -633,8 +1062,9 @@ app.whenReady().then(() => {
   // Broadcast initial state once window is ready
   mainWindow.webContents.on('did-finish-load', () => {
     broadcastState();
-    // Send today's stats
     mainWindow.webContents.send('today-stats', getTodayStats());
+    // Broadcast alarm state if there's a restored alarm
+    broadcastAlarmState();
   });
 
   L.info('App ready');
@@ -644,6 +1074,9 @@ app.on('before-quit', () => {
   L.info('App before-quit');
   isQuitting = true;
   stopTick();
+  if (alarmState.active || alarmState.snoozeTimer) {
+    clearAlarm('quit');
+  }
   saveTimerState();
 });
 

@@ -24,14 +24,31 @@ const el = {
   btnMinimize: document.getElementById('btnMinimize'),
   btnClose: document.getElementById('btnClose'),
   titleBar: document.getElementById('titleBar'),
+
+  // ── Alarm UI elements ───────────────────────────────────────────
+  alarmOverlay: document.getElementById('alarmOverlay'),
+  alarmCardTitle: document.getElementById('alarmCardTitle'),
+  alarmCardBody: document.getElementById('alarmCardBody'),
+  alarmCardIcon: document.getElementById('alarmCardIcon'),
+  btnAlarmDismiss: document.getElementById('btnAlarmDismiss'),
+  btnAlarmSnooze: document.getElementById('btnAlarmSnooze'),
+
+  // ── Alarm settings elements ─────────────────────────────────────
+  alarmSound: document.getElementById('alarmSound'),
+  btnPreview: document.getElementById('btnPreview'),
+  alarmVolume: document.getElementById('alarmVolume'),
+  volumeLabel: document.getElementById('volumeLabel'),
+  alarmContinuous: document.getElementById('alarmContinuous'),
+  snoozeMinutes: document.getElementById('snoozeMinutes'),
+  snoozeLabel: document.getElementById('snoozeLabel'),
 };
 
 // ── Constants ─────────────────────────────────────────────────────────
-const RING_CIRCUMFERENCE = 2 * Math.PI * 90; // r=90 → ~565.49
+const RING_CIRCUMFERENCE = 2 * Math.PI * 90;
 el.ringProgress.style.strokeDasharray = RING_CIRCUMFERENCE;
 el.ringProgress.style.strokeDashoffset = '0';
 
-// ── Local UI state (mirrors main process state) ─────────────────────────
+// ── Local UI state ─────────────────────────────────────────────────────
 const ui = {
   mode: 'work',
   isRunning: false,
@@ -39,37 +56,31 @@ const ui = {
   totalSeconds: 0,
   todayWorkCount: 0,
   settings: { workDuration: 25, breakDuration: 5 },
+  // Alarm settings (mirrored from store)
+  alarmSettings: {
+    sound: 'classic',
+    volume: 0.7,
+    continuous: true,
+    snoozeMinutes: 9,
+  },
+  // Whether an alarm is currently showing
+  alarmActive: false,
+  // Whether we're in snooze period
+  isSnoozing: false,
+  // Preview state
+  isPreviewing: false,
 };
 
-// ── Audio Context (for beep sound) ────────────────────────────────────
-let audioCtx = null;
-function getAudioContext() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  }
-  return audioCtx;
-}
-
+// ── Audio (legacy one-shot beep for non-continuous mode) ──────────────
 function playBeep(frequency = 800, duration = 200, type = 'sine') {
   try {
-    const ctx = getAudioContext();
-    const oscillator = ctx.createOscillator();
-    const gainNode = ctx.createGain();
-    oscillator.type = type;
-    oscillator.frequency.value = frequency;
-    gainNode.gain.value = 0.3;
-    gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration / 1000);
-    oscillator.connect(gainNode);
-    gainNode.connect(ctx.destination);
-    oscillator.start(ctx.currentTime);
-    oscillator.stop(ctx.currentTime + duration / 1000);
+    SoundEngine.setVolume(ui.alarmSettings.volume);
+    SoundEngine.playOnce(ui.alarmSettings.sound);
   } catch (_) { /* audio not available */ }
 }
 
 function playAlarm() {
-  playBeep(880, 150, 'square');
-  setTimeout(() => playBeep(1100, 200, 'square'), 200);
-  setTimeout(() => playBeep(1320, 300, 'square'), 450);
+  playBeep();
 }
 
 // ── UI Update ─────────────────────────────────────────────────────────
@@ -80,13 +91,11 @@ function updateDisplay() {
   el.timerMinutes.textContent = String(mins).padStart(2, '0');
   el.timerSeconds.textContent = String(secs).padStart(2, '0');
 
-  // Update progress ring
   const total = ui.totalSeconds || 1;
   const progress = remaining / total;
   const offset = RING_CIRCUMFERENCE * (1 - progress);
   el.ringProgress.style.strokeDashoffset = offset;
 
-  // Update tray tooltip
   const modeText = ui.mode === 'work' ? '工作中' : '休息中';
   window.timerAPI.setTrayTooltip(`番茄钟 — ${modeText} ${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`);
 }
@@ -130,13 +139,51 @@ function applyState(state) {
   ui.remainingSeconds = state.remainingSeconds;
   ui.totalSeconds = state.totalSeconds;
 
-  if (ui.mode !== wasMode) {
-    updateModeUI();
-  }
-  if (ui.isRunning !== wasRunning) {
-    updateStartButton();
-  }
+  if (ui.mode !== wasMode) updateModeUI();
+  if (ui.isRunning !== wasRunning) updateStartButton();
   updateDisplay();
+}
+
+// ── Alarm UI ──────────────────────────────────────────────────────────
+function showAlarmPopup(data) {
+  if (!data) return;
+
+  ui.alarmActive = true;
+  ui.isSnoozing = false;
+
+  // Update popup content
+  if (data.reason === 'workComplete') {
+    el.alarmCardIcon.textContent = '🍅';
+    el.alarmCardTitle.textContent = '工作时间结束';
+    el.alarmCardBody.textContent = '该进入休息了';
+  } else {
+    el.alarmCardIcon.textContent = '☕';
+    el.alarmCardTitle.textContent = '休息时间结束';
+    el.alarmCardBody.textContent = '该开始工作了';
+  }
+
+  // Update snooze button label
+  const snoozeMin = data.snoozeMinutes || ui.alarmSettings.snoozeMinutes;
+  el.btnAlarmSnooze.textContent = `延时 ${snoozeMin} 分钟`;
+
+  // Show overlay
+  el.alarmOverlay.style.display = 'flex';
+
+  // Start alarm sound
+  SoundEngine.setVolume(data.volume != null ? data.volume : ui.alarmSettings.volume);
+  const continuous = data.continuous != null ? data.continuous : ui.alarmSettings.continuous;
+  if (continuous) {
+    SoundEngine.playLoop(data.sound || ui.alarmSettings.sound);
+  } else {
+    SoundEngine.playOnce(data.sound || ui.alarmSettings.sound);
+  }
+}
+
+function hideAlarmPopup() {
+  ui.alarmActive = false;
+  ui.isSnoozing = false;
+  el.alarmOverlay.style.display = 'none';
+  SoundEngine.stop();
 }
 
 // ── Listen for state pushed from main process ─────────────────────────
@@ -144,9 +191,33 @@ window.timerAPI.onTimerState((state) => {
   applyState(state);
 });
 
-// Listen for alarm trigger from main process
+// Legacy alarm trigger (non-continuous mode)
 window.timerAPI.onPlayAlarm(() => {
   playAlarm();
+});
+
+// New alarm system events
+window.timerAPI.onAlarmStart((data) => {
+  showAlarmPopup(data);
+});
+
+window.timerAPI.onAlarmStop((data) => {
+  hideAlarmPopup();
+  // Clear any stale snooze indication
+  ui.isSnoozing = false;
+});
+
+window.timerAPI.onAlarmSnoozed((data) => {
+  ui.isSnoozing = true;
+  // Show brief "snoozing" feedback on the timer display or badge
+  const snoozeMin = data.snoozeMinutes || ui.alarmSettings.snoozeMinutes;
+  el.btnAlarmSnooze.textContent = `已延时 ${snoozeMin} 分钟`;
+  // Don't hide the overlay instantly; it will be hidden when alarm-stop arrives
+});
+
+window.timerAPI.onAlarmSettingsUpdated((settings) => {
+  ui.alarmSettings = { ...ui.alarmSettings, ...settings };
+  syncAlarmSettingsUI();
 });
 
 // Listen for today stats updates
@@ -166,14 +237,99 @@ el.btnStart.addEventListener('click', () => {
 // Reset
 el.btnReset.addEventListener('click', () => {
   window.timerAPI.timerReset();
+  // If alarm was showing, hide it
+  if (ui.alarmActive) {
+    hideAlarmPopup();
+  }
 });
 
 // Skip
 el.btnSkip.addEventListener('click', () => {
   window.timerAPI.timerSkip();
+  if (ui.alarmActive) {
+    hideAlarmPopup();
+  }
 });
 
-// Settings
+// ── Alarm dismiss / snooze buttons ───────────────────────────────────
+el.btnAlarmDismiss.addEventListener('click', async () => {
+  SoundEngine.stop();
+  await window.timerAPI.alarmDismiss();
+  hideAlarmPopup();
+});
+
+el.btnAlarmSnooze.addEventListener('click', async () => {
+  SoundEngine.stop();
+  await window.timerAPI.alarmSnooze();
+  // Popup will be hidden by alarmStop event from main
+  el.alarmOverlay.style.display = 'none';
+});
+
+// ── Alarm preview button ──────────────────────────────────────────────
+el.btnPreview.addEventListener('click', () => {
+  if (ui.isPreviewing) {
+    // Stop preview
+    SoundEngine.stop();
+    ui.isPreviewing = false;
+    el.btnPreview.textContent = '🔊 试听';
+    el.btnPreview.classList.remove('previewing');
+    window.timerAPI.alarmPreviewStop();
+  } else {
+    // Don't allow preview while alarm is active
+    if (ui.alarmActive) return;
+    // Start preview
+    SoundEngine.setVolume(ui.alarmSettings.volume);
+    SoundEngine.preview(ui.alarmSettings.sound, 3000);
+    ui.isPreviewing = true;
+    el.btnPreview.textContent = '⏹ 停止';
+    el.btnPreview.classList.add('previewing');
+    window.timerAPI.alarmPreviewStart(ui.alarmSettings.sound);
+
+    // Auto-reset preview button state after 3 seconds
+    setTimeout(() => {
+      ui.isPreviewing = false;
+      el.btnPreview.textContent = '🔊 试听';
+      el.btnPreview.classList.remove('previewing');
+    }, 3100);
+  }
+});
+
+// ── Alarm settings controls ───────────────────────────────────────────
+el.alarmSound.addEventListener('change', async () => {
+  // Stop any preview when switching sounds
+  if (ui.isPreviewing) {
+    SoundEngine.stop();
+    ui.isPreviewing = false;
+    el.btnPreview.textContent = '🔊 试听';
+    el.btnPreview.classList.remove('previewing');
+    window.timerAPI.alarmPreviewStop();
+  }
+  ui.alarmSettings.sound = el.alarmSound.value;
+  await window.timerAPI.updateAlarmSettings(ui.alarmSettings);
+});
+
+el.alarmVolume.addEventListener('input', async () => {
+  const val = parseInt(el.alarmVolume.value);
+  el.volumeLabel.textContent = `${val}%`;
+  ui.alarmSettings.volume = val / 100;
+  SoundEngine.setVolume(ui.alarmSettings.volume);
+  await window.timerAPI.updateAlarmSettings(ui.alarmSettings);
+});
+
+el.alarmContinuous.addEventListener('change', async () => {
+  ui.alarmSettings.continuous = el.alarmContinuous.checked;
+  await window.timerAPI.updateAlarmSettings(ui.alarmSettings);
+});
+
+el.snoozeMinutes.addEventListener('input', async () => {
+  const val = parseInt(el.snoozeMinutes.value);
+  el.snoozeLabel.textContent = `${val} 分钟`;
+  el.btnAlarmSnooze.textContent = `延时 ${val} 分钟`;
+  ui.alarmSettings.snoozeMinutes = val;
+  await window.timerAPI.updateAlarmSettings(ui.alarmSettings);
+});
+
+// ── Settings ───────────────────────────────────────────────────────────
 el.settingsToggle.addEventListener('click', () => {
   const visible = el.settingsPanel.style.display !== 'none';
   el.settingsPanel.style.display = visible ? 'none' : 'block';
@@ -193,7 +349,7 @@ el.breakDuration.addEventListener('input', () => {
   window.timerAPI.saveSettings({ workDuration: ui.settings.workDuration, breakDuration: val });
 });
 
-// History toggle
+// ── History toggle ────────────────────────────────────────────────────
 el.historyToggle.addEventListener('click', async () => {
   const visible = el.historyList.style.display !== 'none';
   if (visible) {
@@ -206,14 +362,12 @@ el.historyToggle.addEventListener('click', async () => {
   }
 });
 
-// Window controls
+// ── Window controls ───────────────────────────────────────────────────
 el.btnMinimize.addEventListener('click', () => window.timerAPI.minimizeWindow());
 el.btnClose.addEventListener('click', () => window.timerAPI.closeWindow());
 
 // ── Keyboard Shortcuts ────────────────────────────────────────────────
-// Only work when the window is focused AND the user is NOT typing in an input
 document.addEventListener('keydown', (e) => {
-  // Ignore if user is typing in a text field, contenteditable, etc.
   const tag = document.activeElement ? document.activeElement.tagName : '';
   const isEditable = document.activeElement
     && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
@@ -233,6 +387,22 @@ document.addEventListener('keydown', (e) => {
     if (!isEditable) {
       e.preventDefault();
       window.timerAPI.timerSkip();
+    }
+  } else if (e.code === 'KeyD') {
+    // Dismiss alarm via keyboard
+    if (ui.alarmActive && !isEditable) {
+      e.preventDefault();
+      SoundEngine.stop();
+      window.timerAPI.alarmDismiss();
+      hideAlarmPopup();
+    }
+  } else if (e.code === 'KeyZ') {
+    // Snooze alarm via keyboard
+    if (ui.alarmActive && !isEditable) {
+      e.preventDefault();
+      SoundEngine.stop();
+      window.timerAPI.alarmSnooze();
+      el.alarmOverlay.style.display = 'none';
     }
   }
 });
@@ -275,24 +445,43 @@ async function loadHistory() {
   }).join('');
 }
 
+// ── Sync alarm settings UI with current values ─────────────────────────
+function syncAlarmSettingsUI() {
+  el.alarmSound.value = ui.alarmSettings.sound;
+  el.alarmVolume.value = Math.round(ui.alarmSettings.volume * 100);
+  el.volumeLabel.textContent = `${Math.round(ui.alarmSettings.volume * 100)}%`;
+  el.alarmContinuous.checked = ui.alarmSettings.continuous;
+  el.snoozeMinutes.value = ui.alarmSettings.snoozeMinutes;
+  el.snoozeLabel.textContent = `${ui.alarmSettings.snoozeMinutes} 分钟`;
+  el.btnAlarmSnooze.textContent = `延时 ${ui.alarmSettings.snoozeMinutes} 分钟`;
+  SoundEngine.setVolume(ui.alarmSettings.volume);
+}
+
 // ── Initialization ─────────────────────────────────────────────────────
 async function init() {
-  // Load settings
+  // Load timer settings
   try {
     const settings = await window.timerAPI.getSettings();
     if (settings) {
       ui.settings.workDuration = settings.workDuration || 25;
       ui.settings.breakDuration = settings.breakDuration || 5;
     }
-  } catch (_) {
-    // Use defaults
-  }
+  } catch (_) { /* use defaults */ }
 
-  // Sync settings UI
+  // Sync timer settings UI
   el.workDuration.value = ui.settings.workDuration;
   el.breakDuration.value = ui.settings.breakDuration;
   el.workDurationLabel.textContent = `${ui.settings.workDuration} 分钟`;
   el.breakDurationLabel.textContent = `${ui.settings.breakDuration} 分钟`;
+
+  // Load alarm settings
+  try {
+    const alarmSettings = await window.timerAPI.getAlarmSettings();
+    if (alarmSettings) {
+      ui.alarmSettings = { ...ui.alarmSettings, ...alarmSettings };
+    }
+  } catch (_) { /* use defaults */ }
+  syncAlarmSettingsUI();
 
   // Load today's stats
   try {
@@ -301,22 +490,39 @@ async function init() {
       ui.todayWorkCount = stats.workCount || 0;
       el.todayCount.textContent = ui.todayWorkCount;
     }
-  } catch (_) {
-    // No stats yet
-  }
+  } catch (_) { /* no stats yet */ }
 
-  // Get initial timer state from main process
+  // Get initial timer state
   try {
     const state = await window.timerAPI.timerGetState();
-    if (state) {
-      applyState(state);
-    }
+    if (state) applyState(state);
   } catch (_) {
-    // Use defaults — already set in ui
     ui.remainingSeconds = ui.settings.workDuration * 60;
     ui.totalSeconds = ui.remainingSeconds;
     updateDisplay();
   }
+
+  // Check if there's a restored alarm state
+  try {
+    const alarmState = await window.timerAPI.getAlarmState();
+    if (alarmState && alarmState.active) {
+      // There's a restored active alarm — show the popup
+      // (main will also send alarm-start via broadcastAlarmState)
+      const sound = ui.alarmSettings.sound;
+      const volume = ui.alarmSettings.volume;
+      const continuous = ui.alarmSettings.continuous;
+      showAlarmPopup({
+        reason: alarmState.reason,
+        sound,
+        volume,
+        continuous,
+        snoozeMinutes: alarmState.snoozeMinutes || ui.alarmSettings.snoozeMinutes,
+      });
+    } else if (alarmState && alarmState.snoozeUntil) {
+      // Snoozing
+      ui.isSnoozing = true;
+    }
+  } catch (_) { /* no alarm state */ }
 
   updateModeUI();
   updateStartButton();

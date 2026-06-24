@@ -11,7 +11,6 @@ contextBridge.exposeInMainWorld('timerAPI', {
 
   // ── Timer state updates (main → renderer) ────────────────────────
   onTimerState: (callback) => {
-    // Remove old listener to avoid duplicates
     ipcRenderer.removeAllListeners('timer-state');
     ipcRenderer.on('timer-state', (_event, state) => callback(state));
   },
@@ -22,6 +21,33 @@ contextBridge.exposeInMainWorld('timerAPI', {
     ipcRenderer.on('play-alarm', () => callback());
   },
 
+  // ── Alarm system (main → renderer) ───────────────────────────────
+  onAlarmStart: (callback) => {
+    ipcRenderer.removeAllListeners('alarm-start');
+    ipcRenderer.on('alarm-start', (_event, data) => callback(data));
+  },
+  onAlarmStop: (callback) => {
+    ipcRenderer.removeAllListeners('alarm-stop');
+    ipcRenderer.on('alarm-stop', (_event, data) => callback(data));
+  },
+  onAlarmSnoozed: (callback) => {
+    ipcRenderer.removeAllListeners('alarm-snoozed');
+    ipcRenderer.on('alarm-snoozed', (_event, data) => callback(data));
+  },
+  onAlarmSettingsUpdated: (callback) => {
+    ipcRenderer.removeAllListeners('alarm-settings-updated');
+    ipcRenderer.on('alarm-settings-updated', (_event, settings) => callback(settings));
+  },
+
+  // ── Alarm controls (renderer → main) ─────────────────────────────
+  alarmDismiss: () => ipcRenderer.invoke('alarm-dismiss'),
+  alarmSnooze: () => ipcRenderer.invoke('alarm-snooze'),
+  alarmPreviewStart: (soundName) => ipcRenderer.invoke('alarm-preview-start', soundName),
+  alarmPreviewStop: () => ipcRenderer.invoke('alarm-preview-stop'),
+  updateAlarmSettings: (settings) => ipcRenderer.invoke('update-alarm-settings', settings),
+  getAlarmSettings: () => ipcRenderer.invoke('get-alarm-settings'),
+  getAlarmState: () => ipcRenderer.invoke('get-alarm-state'),
+
   // ── Today stats update (main → renderer) ─────────────────────────
   onTodayStats: (callback) => {
     ipcRenderer.removeAllListeners('today-stats');
@@ -31,10 +57,10 @@ contextBridge.exposeInMainWorld('timerAPI', {
   // ── History ──────────────────────────────────────────────────────
   getHistory: () => ipcRenderer.invoke('get-history'),
 
-  // ── Today stats (direct query) ────────────────────────────────────
+  // ── Today stats (direct query) ───────────────────────────────────
   getTodayStats: () => ipcRenderer.invoke('get-today-stats'),
 
-  // ── Settings ──────────────────────────────────────────────────────
+  // ── Settings ─────────────────────────────────────────────────────
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
 

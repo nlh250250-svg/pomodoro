@@ -84,6 +84,40 @@
         <label>休息时长 <span id="breakDurationLabel">5 分钟</span></label>
         <input type="range" id="breakDuration" min="1" max="30" value="5" step="1">
       </div>
+
+      <!-- ── Alarm settings section ────────────────────────────── -->
+      <div class="alarm-settings-section">
+        <div class="alarm-settings-header">🔔 提醒设置</div>
+
+        <div class="setting-item">
+          <label>铃声选择</label>
+          <select id="alarmSound" class="alarm-select">
+            <option value="classic">经典提示音</option>
+            <option value="bright">清脆铃声</option>
+            <option value="digital">电子闹钟</option>
+            <option value="soft">柔和提醒</option>
+          </select>
+          <button class="btn-preview" id="btnPreview">🔊 试听</button>
+        </div>
+
+        <div class="setting-item">
+          <label>音量 <span id="volumeLabel">70%</span></label>
+          <input type="range" id="alarmVolume" min="0" max="100" value="70" step="5">
+        </div>
+
+        <div class="setting-item setting-row">
+          <label>持续响铃</label>
+          <label class="switch-label">
+            <input type="checkbox" id="alarmContinuous" checked>
+            <span class="switch-track"></span>
+          </label>
+        </div>
+
+        <div class="setting-item">
+          <label>延时时长 <span id="snoozeLabel">9 分钟</span></label>
+          <input type="range" id="snoozeMinutes" min="1" max="30" value="9" step="1">
+        </div>
+      </div>
     </div>
 
     <!-- History section -->
@@ -96,6 +130,24 @@
     </div>
   </div>
 
+  <!-- ── Alarm overlay popup ────────────────────────────────────── -->
+  <div class="alarm-overlay" id="alarmOverlay" style="display:none">
+    <div class="alarm-card">
+      <div class="alarm-card-icon" id="alarmCardIcon">🔔</div>
+      <div class="alarm-card-title" id="alarmCardTitle">工作时间结束</div>
+      <div class="alarm-card-body" id="alarmCardBody">该进入休息了</div>
+      <div class="alarm-card-buttons">
+        <button class="alarm-btn alarm-btn-dismiss" id="btnAlarmDismiss">
+          关闭提醒
+        </button>
+        <button class="alarm-btn alarm-btn-snooze" id="btnAlarmSnooze">
+          延时 9 分钟
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="sounds.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

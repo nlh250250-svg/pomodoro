@@ -12,6 +12,7 @@
   --green: #2ecc71;
   --green-light: #58d68d;
   --accent: #f39c12;
+  --accent-light: #f7b731;
   --radius: 16px;
   --ring-size: 200px;
 }
@@ -209,7 +210,7 @@ body {
   border-radius: var(--radius);
   padding: 16px 20px;
   width: 100%;
-  max-width: 320px;
+  max-width: 340px;
   margin-bottom: 12px;
 }
 
@@ -245,6 +246,106 @@ input[type="range"]::-webkit-slider-thumb {
   cursor: pointer;
   border: 2px solid var(--bg);
   box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+}
+
+/* ── Alarm settings section ────────────────────────────────── */
+.alarm-settings-section {
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--surface-light);
+}
+
+.alarm-settings-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+
+/* Select dropdown */
+.alarm-select {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--surface-light);
+  color: var(--text);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.15s;
+}
+.alarm-select:hover { border-color: rgba(255,255,255,0.25); }
+.alarm-select:focus { border-color: var(--accent); }
+
+/* Preview button */
+.btn-preview {
+  margin-top: 4px;
+  padding: 7px 14px;
+  background: var(--surface-light);
+  color: var(--text);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.btn-preview:hover { background: var(--accent); color: #1a1a2e; border-color: var(--accent); }
+.btn-preview.previewing {
+  background: var(--tomato);
+  color: white;
+  border-color: var(--tomato);
+}
+
+/* Row layout for toggle */
+.setting-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.setting-row label:first-child {
+  flex: 1;
+}
+
+/* Toggle switch */
+.switch-label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.switch-label input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch-track {
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  background: var(--surface-light);
+  border-radius: 12px;
+  transition: background 0.2s;
+  position: relative;
+}
+.switch-track::after {
+  content: '';
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 18px; height: 18px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  transition: all 0.2s;
+}
+.switch-label input:checked + .switch-track {
+  background: var(--accent);
+}
+.switch-label input:checked + .switch-track::after {
+  transform: translateX(20px);
+  background: white;
 }
 
 /* ── History ───────────────────────────────────────────────── */
@@ -291,6 +392,109 @@ input[type="range"]::-webkit-slider-thumb {
 .history-row:nth-child(odd) { background: rgba(255,255,255,0.03); }
 .history-row .type-work { color: var(--tomato-light); }
 .history-row .type-break { color: var(--green-light); }
+
+/* ── Alarm Overlay ─────────────────────────────────────────── */
+.alarm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: overlayFadeIn 0.3s ease;
+  border-radius: 16px;
+}
+
+@keyframes overlayFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.alarm-card {
+  background: var(--surface);
+  border: 1px solid var(--surface-light);
+  border-radius: 20px;
+  padding: 32px 28px 24px;
+  text-align: center;
+  max-width: 320px;
+  width: 90%;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  animation: cardSlideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes cardSlideUp {
+  from { transform: translateY(30px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.alarm-card-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+  animation: alarmPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes alarmPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+}
+
+.alarm-card-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 6px;
+  letter-spacing: 1px;
+}
+
+.alarm-card-body {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+}
+
+.alarm-card-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.alarm-btn {
+  padding: 12px 20px;
+  border: none;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.2s;
+  letter-spacing: 1px;
+}
+.alarm-btn:hover { transform: translateY(-1px); }
+.alarm-btn:active { transform: translateY(0); }
+
+.alarm-btn-dismiss {
+  background: var(--tomato);
+  color: white;
+  box-shadow: 0 4px 16px rgba(233, 69, 96, 0.35);
+}
+.alarm-btn-dismiss:hover {
+  background: var(--tomato-light);
+  box-shadow: 0 6px 24px rgba(233, 69, 96, 0.5);
+}
+
+.alarm-btn-snooze {
+  background: var(--surface-light);
+  color: var(--text);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.alarm-btn-snooze:hover {
+  background: var(--accent);
+  color: #1a1a2e;
+  border-color: var(--accent);
+  box-shadow: 0 4px 16px rgba(243, 156, 18, 0.3);
+}
 
 /* ── Scrollbar ─────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 4px; }

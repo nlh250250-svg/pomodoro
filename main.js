@@ -74,13 +74,27 @@ const alarmState = {
   snoozeTimer: null,
 };
 
+// ── Snooze minutes validation ────────────────────────────────────────
+function clampSnoozeMinutes(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 9;
+  return Math.min(20, Math.max(1, Math.round(n)));
+}
+
 function getAlarmSettings() {
   const defaults = { sound: 'classic', volume: 0.7, continuous: true, snoozeMinutes: 9 };
   const saved = store.get('alarmSettings');
-  return { ...defaults, ...(saved || {}) };
+  const merged = { ...defaults, ...(saved || {}) };
+  // Ensure snoozeMinutes is always within valid range
+  merged.snoozeMinutes = clampSnoozeMinutes(merged.snoozeMinutes);
+  return merged;
 }
 
 function saveAlarmSettingsToStore(settings) {
+  // Clamp snoozeMinutes to valid range before saving
+  if (settings && typeof settings.snoozeMinutes !== 'undefined') {
+    settings.snoozeMinutes = clampSnoozeMinutes(settings.snoozeMinutes);
+  }
   store.set('alarmSettings', settings);
 }
 
@@ -167,6 +181,7 @@ function loadAlarmState() {
       alarmState.reason = saved.reason;
       alarmState.snoozeUntil = saved.snoozeUntil;
       startSnoozeTimer(remainingMs);
+      startSnoozeTick();
       L.info(`Restored snooze timer: ${Math.round(remainingMs / 1000)}s remaining, reason=${saved.reason}`);
       return;
     }
@@ -245,11 +260,23 @@ function broadcastState() {
     const remaining = timer.isRunning
       ? Math.max(0, Math.ceil((timer.endAt - Date.now()) / 1000))
       : timer.remainingSeconds;
+
+    const snoozeRemaining = alarmState.snoozeUntil
+      ? Math.max(0, Math.ceil((alarmState.snoozeUntil - Date.now()) / 1000))
+      : 0;
+    const isSnoozing = !!(alarmState.snoozeTimer && alarmState.snoozeUntil);
+
     mainWindow.webContents.send('timer-state', {
       mode: timer.mode,
       isRunning: timer.isRunning,
       remainingSeconds: remaining,
       totalSeconds: timer.totalSeconds,
+      // Alarm/snooze state for renderer display
+      alarmActive: alarmState.active,
+      alarmReason: alarmState.reason,
+      snoozing: isSnoozing,
+      snoozeUntil: alarmState.snoozeUntil,
+      snoozeRemainingSeconds: snoozeRemaining,
     });
   }
 }
@@ -455,6 +482,9 @@ function sendCompletionNotification() {
 function clearAlarm(trigger) {
   L.info(`Alarm cleared by: ${trigger}`);
 
+  // Clear snooze countdown tick
+  stopSnoozeTick();
+
   if (alarmState.snoozeTimer) {
     clearTimeout(alarmState.snoozeTimer);
     alarmState.snoozeTimer = null;
@@ -481,39 +511,55 @@ function clearAlarm(trigger) {
 }
 
 function handleAlarmDismiss() {
-  // Allow dismiss during both active alarm and snooze period
+  // Guard: ignore if no alarm is active and no snooze is running
   if (!alarmState.active && !alarmState.snoozeTimer) {
-    L.warn('handleAlarmDismiss called but no active alarm or snooze');
+    L.warn('dismiss ignored because alarm inactive');
     return;
   }
 
-  L.info('Alarm dismissed by user');
+  L.info('alarm dismissed');
 
-  // Remember the completed mode before clearing
-  const completedMode = timer.mode;
+  // Remember the completed mode before clearing alarm
+  // alarmState.reason tells us: 'workComplete' means work just ended, 'breakComplete' means break just ended
+  const completedMode = alarmState.reason === 'workComplete' ? 'work' : 'break';
 
   clearAlarm('dismiss');
 
-  // Now switch to the next mode (the mode after the one that completed)
+  // Switch to the next mode
   timer.mode = completedMode === 'work' ? 'break' : 'work';
   timer.isRunning = false;
   timer.endAt = null;
   timer.totalSeconds = timer.mode === 'work' ? getWorkDuration() * 60 : getBreakDuration() * 60;
   timer.remainingSeconds = timer.totalSeconds;
   stopTick();
-  saveTimerState();
+
+  if (completedMode === 'work') {
+    // ── Work completed → auto-start break ──────────────────────────
+    L.info('work dismissed, break auto started');
+    timer.endAt = Date.now() + timer.remainingSeconds * 1000;
+    timer.isRunning = true;
+    saveTimerState();
+    startTick();
+  } else {
+    // ── Break completed → wait for manual start ────────────────────
+    L.info('break dismissed, work waiting for manual start');
+    timer.isRunning = false;
+    timer.endAt = null;
+    saveTimerState();
+  }
+
   broadcastState();
 }
 
 function handleAlarmSnooze() {
   if (!alarmState.active) {
-    L.warn('handleAlarmSnooze called but no active alarm');
+    L.warn('snooze ignored because alarm inactive');
     return;
   }
 
   // Prevent multiple snooze timers
   if (alarmState.snoozeTimer) {
-    L.warn('handleAlarmSnooze called but snooze timer already active — ignoring');
+    L.warn('duplicate snooze timer prevented');
     return;
   }
 
@@ -521,7 +567,7 @@ function handleAlarmSnooze() {
   const snoozeMs = (settings.snoozeMinutes || 9) * 60 * 1000;
   const snoozeUntil = Date.now() + snoozeMs;
 
-  L.info(`Alarm snoozed for ${settings.snoozeMinutes} minutes (until ${new Date(snoozeUntil).toISOString()})`);
+  L.info(`alarm snoozed: snoozeUntil=${new Date(snoozeUntil).toISOString()}, snoozeMinutes=${settings.snoozeMinutes}`);
 
   // Stop the active alarm but keep the reason
   alarmState.active = false;
@@ -529,10 +575,9 @@ function handleAlarmSnooze() {
   alarmState.startedAt = null;
   saveAlarmStateToStore();
 
-  // Tell renderer to stop alarm
+  // Tell renderer to stop alarm and show snooze state
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('alarm-stop', { reason: 'snooze' });
-    // Also notify renderer that snooze is active (for UI feedback)
     mainWindow.webContents.send('alarm-snoozed', {
       snoozeUntil,
       snoozeMinutes: settings.snoozeMinutes,
@@ -541,8 +586,11 @@ function handleAlarmSnooze() {
 
   updateTrayMenu();
 
-  // Set snooze timer
+  // Set snooze timer (fires alarm when snooze ends)
   startSnoozeTimer(snoozeMs);
+
+  // Start snooze countdown tick (periodic UI updates)
+  startSnoozeTick();
 }
 
 function startSnoozeTimer(delayMs) {
@@ -553,10 +601,12 @@ function startSnoozeTimer(delayMs) {
   }
 
   alarmState.snoozeTimer = setTimeout(() => {
-    L.info('Alarm resumed from snooze');
+    L.info('snooze completed');
+    L.info('alarm resumed from snooze');
+    stopSnoozeTick();
     alarmState.snoozeTimer = null;
 
-    // Reactivate alarm
+    // Reactivate alarm — keep the same reason (workComplete or breakComplete)
     alarmState.active = true;
     alarmState.snoozeUntil = null;
     alarmState.startedAt = Date.now();
@@ -582,6 +632,38 @@ function startSnoozeTimer(delayMs) {
   }, delayMs);
 
   L.info(`Snooze timer set for ${Math.round(delayMs / 1000)}s`);
+}
+
+// ── Snooze countdown tick (periodic broadcast to renderer) ──────────────
+let snoozeTickInterval = null;
+
+function startSnoozeTick() {
+  stopSnoozeTick();
+  L.info('snooze countdown tick started');
+  snoozeTickInterval = setInterval(() => {
+    if (!alarmState.snoozeUntil) {
+      stopSnoozeTick();
+      return;
+    }
+
+    const remaining = Math.max(0, Math.ceil((alarmState.snoozeUntil - Date.now()) / 1000));
+    if (remaining <= 0) {
+      // Snooze has expired — the setTimeout callback will handle the rest
+      stopSnoozeTick();
+      return;
+    }
+
+    L.debug(`snooze countdown tick: ${remaining}s remaining`);
+    broadcastState();
+  }, 500);
+}
+
+function stopSnoozeTick() {
+  if (snoozeTickInterval) {
+    clearInterval(snoozeTickInterval);
+    snoozeTickInterval = null;
+    L.info('snooze countdown tick stopped');
+  }
 }
 
 // ── Record ─────────────────────────────────────────────────────────────
@@ -817,6 +899,7 @@ function setupPowerMonitor() {
       if (alarmState.snoozeUntil <= now) {
         // Snooze expired during sleep — trigger alarm
         L.info('Snooze expired during sleep — triggering alarm');
+        stopSnoozeTick();
         if (alarmState.snoozeTimer) {
           clearTimeout(alarmState.snoozeTimer);
           alarmState.snoozeTimer = null;
@@ -844,6 +927,7 @@ function setupPowerMonitor() {
         const remaining = alarmState.snoozeUntil - now;
         L.info(`Snooze still active after resume: ${Math.round(remaining / 1000)}s remaining`);
         startSnoozeTimer(remaining);
+        startSnoozeTick();
       }
     }
 
@@ -1038,11 +1122,22 @@ function getTimerStateForRenderer() {
     ? Math.max(0, Math.ceil((timer.endAt - Date.now()) / 1000))
     : timer.remainingSeconds;
 
+  const snoozeRemaining = alarmState.snoozeUntil
+    ? Math.max(0, Math.ceil((alarmState.snoozeUntil - Date.now()) / 1000))
+    : 0;
+  const isSnoozing = !!(alarmState.snoozeTimer && alarmState.snoozeUntil);
+
   return {
     mode: timer.mode,
     isRunning: timer.isRunning,
     remainingSeconds: remaining,
     totalSeconds: timer.totalSeconds,
+    // Alarm/snooze state for renderer display
+    alarmActive: alarmState.active,
+    alarmReason: alarmState.reason,
+    snoozing: isSnoozing,
+    snoozeUntil: alarmState.snoozeUntil,
+    snoozeRemainingSeconds: snoozeRemaining,
   };
 }
 

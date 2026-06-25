@@ -89,6 +89,12 @@ body {
   color: var(--green-light);
   border: 1px solid rgba(46, 204, 113, 0.3);
 }
+.mode-badge.snooze {
+  background: rgba(243, 156, 18, 0.15);
+  color: var(--accent-light);
+  border: 1px solid rgba(243, 156, 18, 0.3);
+  animation: pulse 1.5s infinite;
+}
 
 /* ── Timer Ring ────────────────────────────────────────────── */
 .timer-ring-container {
@@ -153,6 +159,17 @@ body {
   color: var(--tomato-light);
   font-weight: 700;
   font-size: 16px;
+}
+
+/* ── Snooze Label ──────────────────────────────────────────── */
+.snooze-label {
+  font-size: 13px;
+  color: var(--accent-light);
+  font-weight: 500;
+  margin-top: -8px;
+  margin-bottom: 16px;
+  text-align: center;
+  letter-spacing: 1px;
 }
 
 /* ── Controls ──────────────────────────────────────────────── */

@@ -41,6 +41,7 @@ const el = {
   alarmContinuous: document.getElementById('alarmContinuous'),
   snoozeMinutes: document.getElementById('snoozeMinutes'),
   snoozeLabel: document.getElementById('snoozeLabel'),
+  snoozeMinutesValue: document.getElementById('snoozeMinutesValue'),
 };
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -67,9 +68,14 @@ const ui = {
   alarmActive: false,
   // Whether we're in snooze period
   isSnoozing: false,
+  snoozeUntil: null,
+  snoozeRemainingSeconds: 0,
   // Preview state
   isPreviewing: false,
 };
+
+// Local snooze countdown tick (for smooth UI updates independent of main process)
+let localSnoozeTick = null;
 
 // ── Audio (legacy one-shot beep for non-continuous mode) ──────────────
 function playBeep(frequency = 800, duration = 200, type = 'sine') {
@@ -83,25 +89,90 @@ function playAlarm() {
   playBeep();
 }
 
+// ── Local snooze countdown tick (for smooth UI independent of main ticks) ─
+function startLocalSnoozeTick() {
+  stopLocalSnoozeTick();
+  localSnoozeTick = setInterval(() => {
+    if (!ui.isSnoozing || !ui.snoozeUntil) {
+      stopLocalSnoozeTick();
+      return;
+    }
+    const remaining = Math.max(0, Math.ceil((ui.snoozeUntil - Date.now()) / 1000));
+    if (remaining <= 0) {
+      // Snooze has expired — main process will handle reactivation
+      stopLocalSnoozeTick();
+      return;
+    }
+    ui.snoozeRemainingSeconds = remaining;
+    updateDisplay();
+  }, 500);
+}
+
+function stopLocalSnoozeTick() {
+  if (localSnoozeTick) {
+    clearInterval(localSnoozeTick);
+    localSnoozeTick = null;
+  }
+}
+
+// ── Snooze minutes validation ─────────────────────────────────────────
+function clampSnoozeMinutes(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 9;
+  return Math.min(20, Math.max(1, Math.round(n)));
+}
+
 // ── UI Update ─────────────────────────────────────────────────────────
 function updateDisplay() {
-  const remaining = ui.remainingSeconds;
+  let remaining, total;
+
+  if (ui.isSnoozing) {
+    // During snooze, show snooze countdown based on wall-clock snoozeUntil
+    if (ui.snoozeUntil) {
+      remaining = Math.max(0, Math.ceil((ui.snoozeUntil - Date.now()) / 1000));
+    } else {
+      remaining = ui.snoozeRemainingSeconds || 0;
+    }
+    const snoozeMin = ui.alarmSettings.snoozeMinutes || 9;
+    total = snoozeMin * 60;
+  } else {
+    remaining = ui.remainingSeconds;
+    total = ui.totalSeconds || 1;
+  }
+
   const mins = Math.floor(remaining / 60);
   const secs = remaining % 60;
   el.timerMinutes.textContent = String(mins).padStart(2, '0');
   el.timerSeconds.textContent = String(secs).padStart(2, '0');
 
-  const total = ui.totalSeconds || 1;
-  const progress = remaining / total;
+  const progress = total > 0 ? remaining / total : 0;
   const offset = RING_CIRCUMFERENCE * (1 - progress);
   el.ringProgress.style.strokeDashoffset = offset;
 
-  const modeText = ui.mode === 'work' ? '工作中' : '休息中';
+  // Show/hide snooze label
+  if (ui.isSnoozing) {
+    el.snoozeLabel.style.display = 'block';
+  } else {
+    el.snoozeLabel.style.display = 'none';
+  }
+
+  // Tray tooltip
+  let modeText;
+  if (ui.isSnoozing) {
+    modeText = '加点中';
+  } else {
+    modeText = ui.mode === 'work' ? '工作中' : '休息中';
+  }
   window.timerAPI.setTrayTooltip(`番茄钟 — ${modeText} ${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`);
 }
 
 function updateModeUI() {
-  if (ui.mode === 'work') {
+  if (ui.isSnoozing) {
+    el.modeBadge.textContent = '⏰ 加点中';
+    el.modeBadge.className = 'mode-badge snooze';
+    el.ringProgress.classList.remove('break-mode');
+    document.title = '⏰ 番茄钟 — 加点中';
+  } else if (ui.mode === 'work') {
     el.modeBadge.textContent = '🍅 工作中';
     el.modeBadge.className = 'mode-badge work';
     el.ringProgress.classList.remove('break-mode');
@@ -115,12 +186,21 @@ function updateModeUI() {
 }
 
 function updateStartButton() {
-  if (ui.isRunning) {
+  if (ui.isSnoozing) {
+    // During snooze, hide the play/pause toggle
+    el.iconPlay.style.display = 'none';
+    el.iconPause.style.display = 'none';
+    el.btnStart.classList.add('paused');
+    el.btnStart.style.visibility = 'hidden';
+    el.timerDisplay.classList.remove('running');
+  } else if (ui.isRunning) {
+    el.btnStart.style.visibility = 'visible';
     el.iconPlay.style.display = 'none';
     el.iconPause.style.display = 'block';
     el.btnStart.classList.add('paused');
     el.timerDisplay.classList.add('running');
   } else {
+    el.btnStart.style.visibility = 'visible';
     el.iconPlay.style.display = 'block';
     el.iconPause.style.display = 'none';
     el.btnStart.classList.remove('paused');
@@ -131,6 +211,7 @@ function updateStartButton() {
 function applyState(state) {
   if (!state) return;
 
+  const wasSnoozing = ui.isSnoozing;
   const wasRunning = ui.isRunning;
   const wasMode = ui.mode;
 
@@ -139,8 +220,26 @@ function applyState(state) {
   ui.remainingSeconds = state.remainingSeconds;
   ui.totalSeconds = state.totalSeconds;
 
-  if (ui.mode !== wasMode) updateModeUI();
-  if (ui.isRunning !== wasRunning) updateStartButton();
+  // Handle snooze state from enriched timer-state
+  if (state.snoozing) {
+    ui.isSnoozing = true;
+    ui.snoozeUntil = state.snoozeUntil;
+    ui.snoozeRemainingSeconds = state.snoozeRemainingSeconds;
+    if (!wasSnoozing) {
+      startLocalSnoozeTick();
+    }
+  } else {
+    if (ui.isSnoozing && !state.snoozing) {
+      // Snooze just ended
+      stopLocalSnoozeTick();
+    }
+    ui.isSnoozing = false;
+    ui.snoozeUntil = null;
+    ui.snoozeRemainingSeconds = 0;
+  }
+
+  if (ui.mode !== wasMode || ui.isSnoozing !== wasSnoozing) updateModeUI();
+  if (ui.isRunning !== wasRunning || ui.isSnoozing !== wasSnoozing) updateStartButton();
   updateDisplay();
 }
 
@@ -203,16 +302,32 @@ window.timerAPI.onAlarmStart((data) => {
 
 window.timerAPI.onAlarmStop((data) => {
   hideAlarmPopup();
-  // Clear any stale snooze indication
-  ui.isSnoozing = false;
+  // If alarm stopped with reason other than 'snooze', clear snooze state
+  if (data.reason !== 'snooze') {
+    ui.isSnoozing = false;
+    ui.snoozeUntil = null;
+    ui.snoozeRemainingSeconds = 0;
+    stopLocalSnoozeTick();
+    updateModeUI();
+    updateStartButton();
+  }
 });
 
 window.timerAPI.onAlarmSnoozed((data) => {
   ui.isSnoozing = true;
-  // Show brief "snoozing" feedback on the timer display or badge
+  ui.snoozeUntil = data.snoozeUntil;
+  ui.snoozeRemainingSeconds = Math.max(0, Math.ceil((data.snoozeUntil - Date.now()) / 1000));
+
   const snoozeMin = data.snoozeMinutes || ui.alarmSettings.snoozeMinutes;
   el.btnAlarmSnooze.textContent = `已延时 ${snoozeMin} 分钟`;
-  // Don't hide the overlay instantly; it will be hidden when alarm-stop arrives
+
+  // Update UI to show "加点中" and countdown
+  updateModeUI();
+  updateStartButton();
+  updateDisplay();
+
+  // Start local snooze tick for smooth countdown
+  startLocalSnoozeTick();
 });
 
 window.timerAPI.onAlarmSettingsUpdated((settings) => {
@@ -236,6 +351,13 @@ el.btnStart.addEventListener('click', () => {
 
 // Reset
 el.btnReset.addEventListener('click', () => {
+  // Clear local snooze state before sending to main
+  if (ui.isSnoozing) {
+    stopLocalSnoozeTick();
+    ui.isSnoozing = false;
+    ui.snoozeUntil = null;
+    ui.snoozeRemainingSeconds = 0;
+  }
   window.timerAPI.timerReset();
   // If alarm was showing, hide it
   if (ui.alarmActive) {
@@ -245,6 +367,13 @@ el.btnReset.addEventListener('click', () => {
 
 // Skip
 el.btnSkip.addEventListener('click', () => {
+  // Clear local snooze state before sending to main
+  if (ui.isSnoozing) {
+    stopLocalSnoozeTick();
+    ui.isSnoozing = false;
+    ui.snoozeUntil = null;
+    ui.snoozeRemainingSeconds = 0;
+  }
   window.timerAPI.timerSkip();
   if (ui.alarmActive) {
     hideAlarmPopup();
@@ -321,9 +450,20 @@ el.alarmContinuous.addEventListener('change', async () => {
   await window.timerAPI.updateAlarmSettings(ui.alarmSettings);
 });
 
-el.snoozeMinutes.addEventListener('input', async () => {
-  const val = parseInt(el.snoozeMinutes.value);
-  el.snoozeLabel.textContent = `${val} 分钟`;
+el.snoozeMinutes.addEventListener('input', () => {
+  // Update UI immediately on drag for real-time feedback
+  const val = clampSnoozeMinutes(parseInt(el.snoozeMinutes.value));
+  el.snoozeMinutesValue.textContent = `${val} 分钟`;
+  el.btnAlarmSnooze.textContent = `延时 ${val} 分钟`;
+  ui.alarmSettings.snoozeMinutes = val;
+  // Update volume in case sound engine needs it
+  SoundEngine.setVolume(ui.alarmSettings.volume);
+});
+
+// Save to store when user finishes dragging (reduces frequent writes)
+el.snoozeMinutes.addEventListener('change', async () => {
+  const val = clampSnoozeMinutes(parseInt(el.snoozeMinutes.value));
+  el.snoozeMinutesValue.textContent = `${val} 分钟`;
   el.btnAlarmSnooze.textContent = `延时 ${val} 分钟`;
   ui.alarmSettings.snoozeMinutes = val;
   await window.timerAPI.updateAlarmSettings(ui.alarmSettings);
@@ -381,16 +521,28 @@ document.addEventListener('keydown', (e) => {
   } else if (e.code === 'KeyR') {
     if (!isEditable) {
       e.preventDefault();
+      if (ui.isSnoozing) {
+        stopLocalSnoozeTick();
+        ui.isSnoozing = false;
+        ui.snoozeUntil = null;
+        ui.snoozeRemainingSeconds = 0;
+      }
       window.timerAPI.timerReset();
     }
   } else if (e.code === 'KeyS') {
     if (!isEditable) {
       e.preventDefault();
+      if (ui.isSnoozing) {
+        stopLocalSnoozeTick();
+        ui.isSnoozing = false;
+        ui.snoozeUntil = null;
+        ui.snoozeRemainingSeconds = 0;
+      }
       window.timerAPI.timerSkip();
     }
   } else if (e.code === 'KeyD') {
-    // Dismiss alarm via keyboard
-    if (ui.alarmActive && !isEditable) {
+    // Dismiss alarm via keyboard (works during alarm or snooze)
+    if ((ui.alarmActive || ui.isSnoozing) && !isEditable) {
       e.preventDefault();
       SoundEngine.stop();
       window.timerAPI.alarmDismiss();
@@ -447,13 +599,15 @@ async function loadHistory() {
 
 // ── Sync alarm settings UI with current values ─────────────────────────
 function syncAlarmSettingsUI() {
+  const snoozeVal = clampSnoozeMinutes(ui.alarmSettings.snoozeMinutes);
   el.alarmSound.value = ui.alarmSettings.sound;
   el.alarmVolume.value = Math.round(ui.alarmSettings.volume * 100);
   el.volumeLabel.textContent = `${Math.round(ui.alarmSettings.volume * 100)}%`;
   el.alarmContinuous.checked = ui.alarmSettings.continuous;
-  el.snoozeMinutes.value = ui.alarmSettings.snoozeMinutes;
-  el.snoozeLabel.textContent = `${ui.alarmSettings.snoozeMinutes} 分钟`;
-  el.btnAlarmSnooze.textContent = `延时 ${ui.alarmSettings.snoozeMinutes} 分钟`;
+  el.snoozeMinutes.value = snoozeVal;
+  el.snoozeMinutesValue.textContent = `${snoozeVal} 分钟`;
+  el.btnAlarmSnooze.textContent = `延时 ${snoozeVal} 分钟`;
+  ui.alarmSettings.snoozeMinutes = snoozeVal;
   SoundEngine.setVolume(ui.alarmSettings.volume);
 }
 
@@ -518,9 +672,15 @@ async function init() {
         continuous,
         snoozeMinutes: alarmState.snoozeMinutes || ui.alarmSettings.snoozeMinutes,
       });
-    } else if (alarmState && alarmState.snoozeUntil) {
-      // Snoozing
+    } else if (alarmState && alarmState.snoozeUntil && alarmState.snoozeUntil > Date.now()) {
+      // Snoozing — restore snooze display
       ui.isSnoozing = true;
+      ui.snoozeUntil = alarmState.snoozeUntil;
+      ui.snoozeRemainingSeconds = Math.max(0, Math.ceil((alarmState.snoozeUntil - Date.now()) / 1000));
+      updateModeUI();
+      updateStartButton();
+      updateDisplay();
+      startLocalSnoozeTick();
     }
   } catch (_) { /* no alarm state */ }
 

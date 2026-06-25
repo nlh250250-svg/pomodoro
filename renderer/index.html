@@ -36,6 +36,11 @@
       </div>
     </div>
 
+    <!-- Snooze countdown label (shown during snooze) -->
+    <div class="snooze-label" id="snoozeLabel" style="display:none">
+      后再次提醒
+    </div>
+
     <!-- Session counter -->
     <div class="session-info" id="sessionInfo">
       今日完成：<span id="todayCount">0</span> 个番茄
@@ -114,8 +119,8 @@
         </div>
 
         <div class="setting-item">
-          <label>延时时长 <span id="snoozeLabel">9 分钟</span></label>
-          <input type="range" id="snoozeMinutes" min="1" max="30" value="9" step="1">
+          <label>延时时长 <span id="snoozeMinutesValue">9 分钟</span></label>
+          <input type="range" id="snoozeMinutes" min="1" max="20" value="9" step="1">
         </div>
       </div>
     </div>

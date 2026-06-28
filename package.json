@@ -34,11 +34,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -60,6 +64,7 @@
     "electron-builder": "^25.1.8"
   },
   "dependencies": {
+    "chart.js": "^4.5.1",
     "electron-store": "^8.2.0"
   }
 }

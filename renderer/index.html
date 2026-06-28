@@ -5,8 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>番茄钟</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="avatar.css">
 </head>
 <body>
+  <!-- ── Background video layer (full-screen, pointer-events: none) ── -->
+  <video
+    class="bg-video"
+    id="backgroundVideo"
+    autoplay loop muted playsinline
+    src=""
+  ></video>
+  <!-- Light warm overlay to blend video with UI -->
+  <div class="bg-video-overlay"></div>
+
   <!-- Title bar (draggable) -->
   <div class="title-bar" id="titleBar">
     <span class="title-icon">🍅</span>
@@ -17,13 +28,14 @@
     </div>
   </div>
 
-  <!-- Main content -->
+  <!-- Main content (floats above background video) -->
   <div class="container">
     <!-- Mode indicator -->
     <div class="mode-badge" id="modeBadge">🍅 工作中</div>
 
-    <!-- Timer ring -->
+    <!-- Timer ring (frosted glass backdrop) -->
     <div class="timer-ring-container">
+      <div class="timer-ring-backdrop"></div>
       <svg class="timer-ring" viewBox="0 0 200 200">
         <circle class="ring-bg" cx="100" cy="100" r="90"/>
         <circle class="ring-progress" id="ringProgress" cx="100" cy="100" r="90"
@@ -38,7 +50,7 @@
 
     <!-- Snooze countdown label (shown during snooze) -->
     <div class="snooze-label" id="snoozeLabel" style="display:none">
-      后再次提醒
+      稍后提醒
     </div>
 
     <!-- Session counter -->
@@ -125,22 +137,80 @@
       </div>
     </div>
 
-    <!-- History section -->
-    <div class="history-section" id="historySection">
-      <div class="history-header" id="historyToggle">
-        <span>📊 历史记录</span>
-        <span class="history-arrow" id="historyArrow">▼</span>
+    <!-- ── Task panel ───────────────────────────────────────────── -->
+    <div class="task-section" id="taskSection">
+      <div class="task-input-row">
+        <input type="text" class="task-input" id="taskInput"
+               placeholder="添加任务..." maxlength="120">
+        <select class="task-pomo-select" id="taskEstimatedPomos" title="预估番茄数">
+          <option value="1">1🍅</option>
+          <option value="2">2🍅</option>
+          <option value="3">3🍅</option>
+          <option value="4">4🍅</option>
+          <option value="5">5🍅</option>
+          <option value="6">6🍅</option>
+          <option value="7">7🍅</option>
+          <option value="8">8🍅</option>
+        </select>
+        <button class="task-btn-add" id="btnTaskAdd" title="添加任务">＋</button>
       </div>
-      <div class="history-list" id="historyList" style="display:none"></div>
+      <div class="task-list" id="taskList"></div>
+      <div class="task-active-badge" id="taskActiveBadge" style="display:none">
+        📌 当前任务：<span id="taskActiveName"></span>
+        <button class="task-active-clear" id="btnTaskClearActive">✕</button>
+      </div>
+    </div>
+
+    <!-- ── Stats & History tabs ─────────────────────────────────── -->
+    <div class="bottom-section" id="bottomSection">
+      <div class="bottom-tabs">
+        <button class="bottom-tab active" data-tab="stats">📊 统计</button>
+        <button class="bottom-tab" data-tab="history">📋 记录</button>
+      </div>
+
+      <!-- Stats panel -->
+      <div class="stats-panel" id="statsPanel">
+        <div class="streak-display" id="streakDisplay">
+          <span class="streak-fire">🔥</span>
+          <span class="streak-count" id="streakCount">0</span>
+          <span class="streak-label">天连续专注</span>
+        </div>
+        <div class="stats-summary" id="statsSummary">
+          <div class="stats-summary-item">
+            <span class="stats-summary-value" id="weeklyTotalHours">0</span>
+            <span class="stats-summary-label">本周专注小时</span>
+          </div>
+          <div class="stats-summary-item">
+            <span class="stats-summary-value" id="weeklyTotalPomos">0</span>
+            <span class="stats-summary-label">本周番茄数</span>
+          </div>
+        </div>
+        <div class="chart-container">
+          <canvas id="weeklyChart" height="180"></canvas>
+        </div>
+      </div>
+
+      <!-- History panel -->
+      <div class="history-panel" id="historyPanel" style="display:none">
+        <div class="history-list" id="historyList"></div>
+      </div>
     </div>
   </div>
 
   <!-- ── Alarm overlay popup ────────────────────────────────────── -->
   <div class="alarm-overlay" id="alarmOverlay" style="display:none">
     <div class="alarm-card">
-      <div class="alarm-card-icon" id="alarmCardIcon">🔔</div>
-      <div class="alarm-card-title" id="alarmCardTitle">工作时间结束</div>
-      <div class="alarm-card-body" id="alarmCardBody">该进入休息了</div>
+      <!-- Alert animation video (alert-rest.mp4 or alert-work.mp4) -->
+      <div class="alarm-card-video-wrap">
+        <video
+          class="alarm-card-video"
+          id="alarmCardVideo"
+          autoplay loop muted playsinline
+          src=""
+        ></video>
+      </div>
+      <!-- Small context subtitle (does not overlap video text) -->
+      <div class="alarm-card-subtitle" id="alarmCardSubtitle"></div>
       <div class="alarm-card-buttons">
         <button class="alarm-btn alarm-btn-dismiss" id="btnAlarmDismiss">
           关闭提醒
@@ -153,6 +223,9 @@
   </div>
 
   <script src="sounds.js"></script>
+  <script src="avatar.js"></script>
+  <script src="../node_modules/chart.js/dist/chart.umd.js"></script>
+  <script src="stats.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

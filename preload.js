@@ -70,7 +70,22 @@ contextBridge.exposeInMainWorld('timerAPI', {
   // ── Tray ──────────────────────────────────────────────────────────
   setTrayTooltip: (text) => ipcRenderer.invoke('set-tray-tooltip', text),
 
+  // ── Asset path resolution (works in dev and packaged) ────────────
+  getAssetUrl: (relativePath) => ipcRenderer.invoke('get-asset-url', relativePath),
+
   // ── Window controls ───────────────────────────────────────────────
   minimizeWindow: () => ipcRenderer.send('minimize-window'),
   closeWindow: () => ipcRenderer.send('close-window'),
+
+  // ── Task management ──────────────────────────────────────────────
+  taskCreate: (taskData) => ipcRenderer.invoke('task-create', taskData),
+  taskUpdate: (id, updates) => ipcRenderer.invoke('task-update', { id, updates }),
+  taskDelete: (id) => ipcRenderer.invoke('task-delete', id),
+  taskList: () => ipcRenderer.invoke('task-list'),
+  taskSetActive: (id) => ipcRenderer.invoke('task-set-active', id),
+  taskGetActive: () => ipcRenderer.invoke('task-get-active'),
+
+  // ── Statistics ───────────────────────────────────────────────────
+  getWeeklyStats: () => ipcRenderer.invoke('get-weekly-stats'),
+  getStreak: () => ipcRenderer.invoke('get-streak'),
 });

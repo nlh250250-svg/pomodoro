@@ -18,18 +18,18 @@ const el = {
   breakDurationLabel: document.getElementById('breakDurationLabel'),
   settingsToggle: document.getElementById('settingsToggle'),
   settingsPanel: document.getElementById('settingsPanel'),
-  historyToggle: document.getElementById('historyToggle'),
   historyList: document.getElementById('historyList'),
-  historyArrow: document.getElementById('historyArrow'),
   btnMinimize: document.getElementById('btnMinimize'),
   btnClose: document.getElementById('btnClose'),
   titleBar: document.getElementById('titleBar'),
 
+  // ── Background video ──────────────────────────────────────────
+  backgroundVideo: document.getElementById('backgroundVideo'),
+
   // ── Alarm UI elements ───────────────────────────────────────────
   alarmOverlay: document.getElementById('alarmOverlay'),
-  alarmCardTitle: document.getElementById('alarmCardTitle'),
-  alarmCardBody: document.getElementById('alarmCardBody'),
-  alarmCardIcon: document.getElementById('alarmCardIcon'),
+  alarmCardVideo: document.getElementById('alarmCardVideo'),
+  alarmCardSubtitle: document.getElementById('alarmCardSubtitle'),
   btnAlarmDismiss: document.getElementById('btnAlarmDismiss'),
   btnAlarmSnooze: document.getElementById('btnAlarmSnooze'),
 
@@ -42,6 +42,20 @@ const el = {
   snoozeMinutes: document.getElementById('snoozeMinutes'),
   snoozeLabel: document.getElementById('snoozeLabel'),
   snoozeMinutesValue: document.getElementById('snoozeMinutesValue'),
+
+  // ── Task elements ─────────────────────────────────────────────
+  taskInput: document.getElementById('taskInput'),
+  taskEstimatedPomos: document.getElementById('taskEstimatedPomos'),
+  btnTaskAdd: document.getElementById('btnTaskAdd'),
+  taskList: document.getElementById('taskList'),
+  taskActiveBadge: document.getElementById('taskActiveBadge'),
+  taskActiveName: document.getElementById('taskActiveName'),
+  btnTaskClearActive: document.getElementById('btnTaskClearActive'),
+
+  // ── Stats & History tabs ──────────────────────────────────────
+  bottomTabs: document.querySelectorAll('.bottom-tab'),
+  statsPanel: document.getElementById('statsPanel'),
+  historyPanel: document.getElementById('historyPanel'),
 };
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -72,6 +86,12 @@ const ui = {
   snoozeRemainingSeconds: 0,
   // Preview state
   isPreviewing: false,
+  // Alarm video URLs (resolved via IPC)
+  alarmVideoUrls: {},
+  // Tasks
+  tasks: [],
+  activeTaskId: null,
+  activeTaskTitle: null,
 };
 
 // Local snooze countdown tick (for smooth UI updates independent of main process)
@@ -149,30 +169,21 @@ function updateDisplay() {
   const offset = RING_CIRCUMFERENCE * (1 - progress);
   el.ringProgress.style.strokeDashoffset = offset;
 
-  // Show/hide snooze label
+  // Show/hide snooze label with dynamic countdown
   if (ui.isSnoozing) {
     el.snoozeLabel.style.display = 'block';
+    el.snoozeLabel.textContent = `稍后提醒 ${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
   } else {
     el.snoozeLabel.style.display = 'none';
   }
 
   // Tray tooltip
-  let modeText;
-  if (ui.isSnoozing) {
-    modeText = '加点中';
-  } else {
-    modeText = ui.mode === 'work' ? '工作中' : '休息中';
-  }
+  const modeText = ui.mode === 'work' ? '工作中' : '休息中';
   window.timerAPI.setTrayTooltip(`番茄钟 — ${modeText} ${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`);
 }
 
 function updateModeUI() {
-  if (ui.isSnoozing) {
-    el.modeBadge.textContent = '⏰ 加点中';
-    el.modeBadge.className = 'mode-badge snooze';
-    el.ringProgress.classList.remove('break-mode');
-    document.title = '⏰ 番茄钟 — 加点中';
-  } else if (ui.mode === 'work') {
+  if (ui.mode === 'work') {
     el.modeBadge.textContent = '🍅 工作中';
     el.modeBadge.className = 'mode-badge work';
     el.ringProgress.classList.remove('break-mode');
@@ -238,9 +249,19 @@ function applyState(state) {
     ui.snoozeRemainingSeconds = 0;
   }
 
-  if (ui.mode !== wasMode || ui.isSnoozing !== wasSnoozing) updateModeUI();
+  // Track active task from state
+  if (state.activeTaskId !== undefined) {
+    ui.activeTaskId = state.activeTaskId;
+    ui.activeTaskTitle = state.activeTaskTitle;
+    updateTaskActiveBadge();
+  }
+
+  if (ui.mode !== wasMode) updateModeUI();
   if (ui.isRunning !== wasRunning || ui.isSnoozing !== wasSnoozing) updateStartButton();
   updateDisplay();
+
+  // Sync character avatar with current state
+  CharacterEngine.updateCharacterState(state);
 }
 
 // ── Alarm UI ──────────────────────────────────────────────────────────
@@ -250,15 +271,20 @@ function showAlarmPopup(data) {
   ui.alarmActive = true;
   ui.isSnoozing = false;
 
-  // Update popup content
-  if (data.reason === 'workComplete') {
-    el.alarmCardIcon.textContent = '🍅';
-    el.alarmCardTitle.textContent = '工作时间结束';
-    el.alarmCardBody.textContent = '该进入休息了';
-  } else {
-    el.alarmCardIcon.textContent = '☕';
-    el.alarmCardTitle.textContent = '休息时间结束';
-    el.alarmCardBody.textContent = '该开始工作了';
+  // Determine alert video and subtitle
+  const isWorkComplete = data.reason === 'workComplete';
+  const alertVideoName = isWorkComplete ? 'alert-rest' : 'alert-work';
+
+  // Set alert video in popup
+  if (el.alarmCardVideo && ui.alarmVideoUrls && ui.alarmVideoUrls[alertVideoName]) {
+    el.alarmCardVideo.setAttribute('src', ui.alarmVideoUrls[alertVideoName]);
+    el.alarmCardVideo.load();
+    el.alarmCardVideo.play().catch(() => {});
+  }
+
+  // Small subtitle (does NOT duplicate the video's built-in text)
+  if (el.alarmCardSubtitle) {
+    el.alarmCardSubtitle.textContent = isWorkComplete ? '工作时间结束' : '休息时间结束';
   }
 
   // Update snooze button label
@@ -276,6 +302,15 @@ function showAlarmPopup(data) {
   } else {
     SoundEngine.playOnce(data.sound || ui.alarmSettings.sound);
   }
+
+  // Update character to alarm state
+  CharacterEngine.updateCharacterState({
+    mode: ui.mode,
+    isRunning: ui.isRunning,
+    alarmActive: true,
+    alarmReason: data.reason,
+    snoozing: false,
+  });
 }
 
 function hideAlarmPopup() {
@@ -283,6 +318,22 @@ function hideAlarmPopup() {
   ui.isSnoozing = false;
   el.alarmOverlay.style.display = 'none';
   SoundEngine.stop();
+
+  // Clear alarm video
+  if (el.alarmCardVideo) {
+    el.alarmCardVideo.pause();
+    el.alarmCardVideo.removeAttribute('src');
+    el.alarmCardVideo.load();
+  }
+
+  // Reset character to idle (next timer-state will refine this)
+  CharacterEngine.updateCharacterState({
+    mode: ui.mode,
+    isRunning: ui.isRunning,
+    alarmActive: false,
+    alarmReason: null,
+    snoozing: false,
+  });
 }
 
 // ── Listen for state pushed from main process ─────────────────────────
@@ -318,15 +369,12 @@ window.timerAPI.onAlarmSnoozed((data) => {
   ui.snoozeUntil = data.snoozeUntil;
   ui.snoozeRemainingSeconds = Math.max(0, Math.ceil((data.snoozeUntil - Date.now()) / 1000));
 
-  const snoozeMin = data.snoozeMinutes || ui.alarmSettings.snoozeMinutes;
-  el.btnAlarmSnooze.textContent = `已延时 ${snoozeMin} 分钟`;
-
-  // Update UI to show "加点中" and countdown
+  // Snooze keeps current work/break mode — no "加点中"
   updateModeUI();
   updateStartButton();
   updateDisplay();
 
-  // Start local snooze tick for smooth countdown
+  // Start local snooze tick for countdown display
   startLocalSnoozeTick();
 });
 
@@ -489,19 +537,6 @@ el.breakDuration.addEventListener('input', () => {
   window.timerAPI.saveSettings({ workDuration: ui.settings.workDuration, breakDuration: val });
 });
 
-// ── History toggle ────────────────────────────────────────────────────
-el.historyToggle.addEventListener('click', async () => {
-  const visible = el.historyList.style.display !== 'none';
-  if (visible) {
-    el.historyList.style.display = 'none';
-    el.historyArrow.classList.remove('open');
-  } else {
-    await loadHistory();
-    el.historyList.style.display = 'block';
-    el.historyArrow.classList.add('open');
-  }
-});
-
 // ── Window controls ───────────────────────────────────────────────────
 el.btnMinimize.addEventListener('click', () => window.timerAPI.minimizeWindow());
 el.btnClose.addEventListener('click', () => window.timerAPI.closeWindow());
@@ -576,15 +611,21 @@ async function loadHistory() {
     const d = new Date(date);
     const dayName = dayNames[d.getDay()];
 
-    const rows = records.map(r => `
+    const rows = records.map(r => {
+      const taskRef = r.taskTitle
+        ? `<span class="task-ref" title="${escapeHtml(r.taskTitle)}">📌 ${escapeHtml(r.taskTitle)}</span>`
+        : '';
+      return `
       <div class="history-row">
         <span class="${r.type === 'work' ? 'type-work' : 'type-break'}">
           ${r.type === 'work' ? '🍅 工作' : '☕ 休息'}
         </span>
+        ${taskRef}
         <span>${r.duration} 分钟</span>
         <span>${r.completedAt || ''}</span>
       </div>
-    `).join('');
+    `;
+    }).join('');
 
     return `
       <div class="history-date-group">
@@ -596,6 +637,151 @@ async function loadHistory() {
     `;
   }).join('');
 }
+
+// ── Task Panel ────────────────────────────────────────────────────────
+function updateTaskActiveBadge() {
+  if (ui.activeTaskId && ui.activeTaskTitle) {
+    el.taskActiveBadge.style.display = 'flex';
+    el.taskActiveName.textContent = ui.activeTaskTitle;
+  } else {
+    el.taskActiveBadge.style.display = 'none';
+    el.taskActiveName.textContent = '';
+  }
+  // Highlight active row
+  const rows = el.taskList.querySelectorAll('.task-row');
+  rows.forEach(row => {
+    row.classList.toggle('active', row.dataset.taskId === ui.activeTaskId);
+  });
+}
+
+async function refreshTaskList() {
+  try {
+    ui.tasks = await window.timerAPI.taskList();
+    renderTaskList();
+  } catch (err) {
+    console.error('Failed to load tasks:', err);
+  }
+}
+
+function renderTaskList() {
+  if (!ui.tasks || ui.tasks.length === 0) {
+    el.taskList.innerHTML = '<div style="padding:8px;color:var(--text-muted);font-size:12px;text-align:center">暂无任务，添加一个吧</div>';
+    return;
+  }
+
+  el.taskList.innerHTML = ui.tasks.map(t => {
+    const dots = [];
+    const max = Math.max(t.estimatedPomodoros || 1, t.completedPomodoros || 0);
+    for (let i = 0; i < max; i++) {
+      const done = i < (t.completedPomodoros || 0);
+      dots.push(`<span class="task-pomo-dot${done ? ' done' : ''}"></span>`);
+    }
+
+    return `
+      <div class="task-row${ui.activeTaskId === t.id ? ' active' : ''}" data-task-id="${t.id}">
+        <span class="task-row-indicator">✓</span>
+        <span class="task-row-title">${escapeHtml(t.title)}</span>
+        <span class="task-row-pomos">${dots.join('')}</span>
+        <button class="task-row-delete" data-delete="${t.id}" title="删除">✕</button>
+      </div>
+    `;
+  }).join('');
+
+  // Click handlers for task rows
+  el.taskList.querySelectorAll('.task-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      // Don't select if clicking delete button
+      if (e.target.closest('.task-row-delete')) return;
+      const taskId = row.dataset.taskId;
+      setActiveTask(taskId);
+    });
+  });
+
+  // Delete buttons
+  el.taskList.querySelectorAll('.task-row-delete').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const taskId = btn.dataset.delete;
+      await window.timerAPI.taskDelete(taskId);
+      if (ui.activeTaskId === taskId) {
+        ui.activeTaskId = null;
+        ui.activeTaskTitle = null;
+        updateTaskActiveBadge();
+      }
+      await refreshTaskList();
+    });
+  });
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+async function setActiveTask(taskId) {
+  const result = await window.timerAPI.taskSetActive(taskId);
+  if (result !== null) {
+    ui.activeTaskId = taskId;
+    const task = ui.tasks.find(t => t.id === taskId);
+    ui.activeTaskTitle = task ? task.title : null;
+    updateTaskActiveBadge();
+  }
+}
+
+async function clearActiveTask() {
+  await window.timerAPI.taskSetActive(null);
+  ui.activeTaskId = null;
+  ui.activeTaskTitle = null;
+  updateTaskActiveBadge();
+}
+
+// ── Task Panel Event Handlers ──────────────────────────────────────────
+el.btnTaskAdd.addEventListener('click', async () => {
+  const title = el.taskInput.value.trim();
+  if (!title) return;
+  const estimatedPomos = parseInt(el.taskEstimatedPomos.value) || 1;
+  await window.timerAPI.taskCreate({ title, estimatedPomodoros: estimatedPomos });
+  el.taskInput.value = '';
+  el.taskEstimatedPomos.value = '1';
+  await refreshTaskList();
+});
+
+el.taskInput.addEventListener('keydown', async (e) => {
+  if (e.key === 'Enter') {
+    const title = el.taskInput.value.trim();
+    if (!title) return;
+    const estimatedPomos = parseInt(el.taskEstimatedPomos.value) || 1;
+    await window.timerAPI.taskCreate({ title, estimatedPomodoros: estimatedPomos });
+    el.taskInput.value = '';
+    el.taskEstimatedPomos.value = '1';
+    await refreshTaskList();
+  }
+});
+
+el.btnTaskClearActive.addEventListener('click', () => {
+  clearActiveTask();
+});
+
+// ── Stats / History Tabs ──────────────────────────────────────────────
+el.bottomTabs.forEach(tab => {
+  tab.addEventListener('click', async () => {
+    // Update active tab style
+    el.bottomTabs.forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+
+    const tabName = tab.dataset.tab;
+    if (tabName === 'stats') {
+      el.statsPanel.style.display = 'block';
+      el.historyPanel.style.display = 'none';
+      await StatsEngine.loadStats();
+    } else if (tabName === 'history') {
+      el.statsPanel.style.display = 'none';
+      el.historyPanel.style.display = 'block';
+      await loadHistory();
+    }
+  });
+});
 
 // ── Sync alarm settings UI with current values ─────────────────────────
 function syncAlarmSettingsUI() {
@@ -683,6 +869,41 @@ async function init() {
       startLocalSnoozeTick();
     }
   } catch (_) { /* no alarm state */ }
+
+  // Load tasks
+  await refreshTaskList();
+
+  // Load active task
+  try {
+    const activeTask = await window.timerAPI.taskGetActive();
+    if (activeTask) {
+      ui.activeTaskId = activeTask.id;
+      ui.activeTaskTitle = activeTask.title;
+      updateTaskActiveBadge();
+    }
+  } catch (_) { /* no active task */ }
+
+  // Load initial stats
+  await StatsEngine.loadStats();
+
+  // Initialize character video engine
+  CharacterEngine.init();
+
+  // Load avatar video URLs via IPC (works in both dev and packaged)
+  const mainVideoNames = ['work', 'break', 'snooze'];
+  const alarmVideoNames = ['alert-rest', 'alert-work'];
+  const videoUrls = {};
+  try {
+    for (const name of mainVideoNames) {
+      const url = await window.timerAPI.getAssetUrl(`avatar/videos/${name}.mp4`);
+      if (url) videoUrls[name] = url;
+    }
+    for (const name of alarmVideoNames) {
+      const url = await window.timerAPI.getAssetUrl(`avatar/videos/${name}.mp4`);
+      if (url) ui.alarmVideoUrls[name] = url;
+    }
+  } catch (_) { /* video paths unavailable */ }
+  CharacterEngine.setVideoUrls(videoUrls);
 
   updateModeUI();
   updateStartButton();

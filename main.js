@@ -46,7 +46,10 @@ const store = new Store({
       active: false,
       reason: null,
       snoozeUntil: null,
-    }
+    },
+    // Task system defaults
+    tasks: [],
+    activeTaskId: null,
   }
 });
 
@@ -62,6 +65,7 @@ const timer = {
   remainingSeconds: 0,
   totalSeconds: 0,
   intervalId: null,
+  currentTaskId: null,   // active task ID when timer was started
 };
 
 // ── Alarm State (in main process) ─────────────────────────────────────
@@ -223,6 +227,109 @@ function getBreakDuration() {
   return (settings && settings.breakDuration) ? settings.breakDuration : 5;
 }
 
+// ── Task Helpers ────────────────────────────────────────────────────────
+function getTasks() {
+  return store.get('tasks') || [];
+}
+
+function saveTasks(tasks) {
+  store.set('tasks', tasks);
+}
+
+function getActiveTaskId() {
+  return store.get('activeTaskId') || null;
+}
+
+function setActiveTaskId(id) {
+  store.set('activeTaskId', id);
+}
+
+function getTaskById(id) {
+  const tasks = getTasks();
+  return tasks.find(t => t.id === id) || null;
+}
+
+// ── Stats Helpers ──────────────────────────────────────────────────────
+function getTodayDateStr() {
+  return new Date().toISOString().split('T')[0];
+}
+
+function getDateStr(daysAgo) {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  return d.toISOString().split('T')[0];
+}
+
+function getWeeklyStats() {
+  const history = store.get('history') || {};
+  const stats = [];
+  for (let i = 6; i >= 0; i--) {
+    const date = getDateStr(i);
+    const records = history[date] || [];
+    const workRecords = records.filter(r => r.type === 'work');
+    const breakRecords = records.filter(r => r.type === 'break');
+    stats.push({
+      date,
+      workCount: workRecords.length,
+      totalWorkMinutes: workRecords.reduce((s, r) => s + (r.duration || 0), 0),
+      breakCount: breakRecords.length,
+      totalBreakMinutes: breakRecords.reduce((s, r) => s + (r.duration || 0), 0),
+    });
+  }
+  return stats;
+}
+
+function getStreak() {
+  const history = store.get('history') || {};
+  let currentStreak = 0;
+  let longestStreak = 0;
+  let streakCount = 0;
+  let i = 0;
+
+  // Calculate current streak (from today backwards)
+  while (true) {
+    const date = getDateStr(i);
+    const records = history[date] || [];
+    const hasWork = records.some(r => r.type === 'work');
+    if (hasWork) {
+      currentStreak++;
+      i++;
+    } else {
+      break;
+    }
+    // Safety limit
+    if (i > 365) break;
+  }
+
+  // Calculate longest streak
+  const allDates = Object.keys(history).sort();
+  for (let j = 0; j < allDates.length; j++) {
+    const date = allDates[j];
+    const records = history[date] || [];
+    const hasWork = records.some(r => r.type === 'work');
+    if (hasWork) {
+      streakCount++;
+      if (streakCount > longestStreak) longestStreak = streakCount;
+    } else {
+      streakCount = 0;
+    }
+  }
+
+  // Edge case: if records only span a few dates, check each individually
+  if (longestStreak === 0) {
+    for (const date of allDates) {
+      const records = history[date] || [];
+      if (records.some(r => r.type === 'work')) {
+        longestStreak = Math.max(longestStreak, 1);
+      }
+    }
+  }
+
+  const lastActiveDate = currentStreak > 0 ? getDateStr(0) : (allDates.length > 0 ? allDates.sort().reverse()[0] : null);
+
+  return { currentStreak, longestStreak, lastActiveDate };
+}
+
 // ── Timer Tick ─────────────────────────────────────────────────────────
 function startTick() {
   stopTick();
@@ -266,6 +373,8 @@ function broadcastState() {
       : 0;
     const isSnoozing = !!(alarmState.snoozeTimer && alarmState.snoozeUntil);
 
+    const activeTask = getActiveTaskId() ? getTaskById(getActiveTaskId()) : null;
+
     mainWindow.webContents.send('timer-state', {
       mode: timer.mode,
       isRunning: timer.isRunning,
@@ -277,6 +386,9 @@ function broadcastState() {
       snoozing: isSnoozing,
       snoozeUntil: alarmState.snoozeUntil,
       snoozeRemainingSeconds: snoozeRemaining,
+      // Active task info for renderer display
+      activeTaskId: getActiveTaskId(),
+      activeTaskTitle: activeTask ? activeTask.title : null,
     });
   }
 }
@@ -330,7 +442,10 @@ function handleStart() {
   timer.endAt = Date.now() + timer.remainingSeconds * 1000;
   timer.isRunning = true;
 
-  L.info(`Timer start: mode=${timer.mode}, remaining=${timer.remainingSeconds}s, endAt=${new Date(timer.endAt).toISOString()}`);
+  // Capture active task at start time
+  timer.currentTaskId = getActiveTaskId();
+
+  L.info(`Timer start: mode=${timer.mode}, remaining=${timer.remainingSeconds}s, endAt=${new Date(timer.endAt).toISOString()}, taskId=${timer.currentTaskId || 'none'}`);
   saveTimerState();
   startTick();
   broadcastState();
@@ -448,7 +563,27 @@ function saveCompletionRecord() {
     ? (settings && settings.workDuration) || 25
     : (settings && settings.breakDuration) || 5;
 
-  saveRecord({ type: timer.mode, duration });
+  // If a task was active, increment its completed pomodoros
+  if (timer.currentTaskId) {
+    const tasks = getTasks();
+    const task = tasks.find(t => t.id === timer.currentTaskId);
+    if (task) {
+      task.completedPomodoros = (task.completedPomodoros || 0) + 1;
+      saveTasks(tasks);
+      L.info(`Task ${task.id} completed pomodoros incremented to ${task.completedPomodoros}`);
+    }
+  }
+
+  const record = { type: timer.mode, duration };
+  if (timer.currentTaskId) {
+    const task = getTaskById(timer.currentTaskId);
+    record.taskId = timer.currentTaskId;
+    record.taskTitle = task ? task.title : '(已删除)';
+  }
+
+  saveRecord(record);
+  // Clear currentTaskId after recording (next start will re-capture)
+  timer.currentTaskId = null;
 }
 
 function switchMode() {
@@ -1047,6 +1182,16 @@ function setupIPC() {
     };
   });
 
+  // Resolve asset path for renderer (works in both dev and packaged)
+  ipcMain.handle('get-asset-url', (_event, relativePath) => {
+    const fullPath = getAssetPath(relativePath);
+    // On Windows, construct proper file:// URL: file:///D:/path/to/file
+    const normalized = fullPath.replace(/\\/g, '/');
+    const url = 'file:///' + normalized;
+    L.info(`Asset URL resolved: ${relativePath} → ${url}`);
+    return url;
+  });
+
   // Save a completed Pomodoro record
   ipcMain.handle('save-record', (_event, record) => {
     saveRecord(record);
@@ -1082,6 +1227,82 @@ function setupIPC() {
       broadcastState();
     }
     return settings;
+  });
+
+  // ── Task IPC handlers ───────────────────────────────────────────────
+  ipcMain.handle('task-create', (_event, taskData) => {
+    const tasks = getTasks();
+    const task = {
+      id: String(Date.now()),
+      title: taskData.title || '',
+      estimatedPomodoros: taskData.estimatedPomodoros || 1,
+      completedPomodoros: 0,
+      project: taskData.project || null,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+      order: tasks.length,
+    };
+    tasks.push(task);
+    saveTasks(tasks);
+    L.info(`Task created: ${task.title} (id=${task.id})`);
+    return task;
+  });
+
+  ipcMain.handle('task-update', (_event, { id, updates }) => {
+    const tasks = getTasks();
+    const idx = tasks.findIndex(t => t.id === id);
+    if (idx === -1) return null;
+    const allowed = ['title', 'estimatedPomodoros', 'completedPomodoros', 'project', 'completedAt', 'order'];
+    for (const key of allowed) {
+      if (key in updates) tasks[idx][key] = updates[key];
+    }
+    saveTasks(tasks);
+    L.info(`Task updated: id=${id}`);
+    return tasks[idx];
+  });
+
+  ipcMain.handle('task-delete', (_event, id) => {
+    let tasks = getTasks();
+    tasks = tasks.filter(t => t.id !== id);
+    saveTasks(tasks);
+    // Clear active task if deleted
+    if (getActiveTaskId() === id) {
+      setActiveTaskId(null);
+    }
+    L.info(`Task deleted: id=${id}`);
+    return true;
+  });
+
+  ipcMain.handle('task-list', () => {
+    const tasks = getTasks();
+    tasks.sort((a, b) => (a.order || 0) - (b.order || 0));
+    return tasks;
+  });
+
+  ipcMain.handle('task-set-active', (_event, id) => {
+    // Validate task exists before setting
+    if (id !== null) {
+      const task = getTaskById(id);
+      if (!task) return null;
+    }
+    setActiveTaskId(id);
+    L.info(`Active task set: id=${id || 'none'}`);
+    return id;
+  });
+
+  ipcMain.handle('task-get-active', () => {
+    const activeId = getActiveTaskId();
+    if (!activeId) return null;
+    return getTaskById(activeId) || null;
+  });
+
+  // ── Stats IPC handlers ──────────────────────────────────────────────
+  ipcMain.handle('get-weekly-stats', () => {
+    return getWeeklyStats();
+  });
+
+  ipcMain.handle('get-streak', () => {
+    return getStreak();
   });
 
   // Send desktop notification
@@ -1127,6 +1348,8 @@ function getTimerStateForRenderer() {
     : 0;
   const isSnoozing = !!(alarmState.snoozeTimer && alarmState.snoozeUntil);
 
+  const activeTask = getActiveTaskId() ? getTaskById(getActiveTaskId()) : null;
+
   return {
     mode: timer.mode,
     isRunning: timer.isRunning,
@@ -1138,6 +1361,9 @@ function getTimerStateForRenderer() {
     snoozing: isSnoozing,
     snoozeUntil: alarmState.snoozeUntil,
     snoozeRemainingSeconds: snoozeRemaining,
+    // Active task info for renderer display
+    activeTaskId: getActiveTaskId(),
+    activeTaskTitle: activeTask ? activeTask.title : null,
   };
 }
 
